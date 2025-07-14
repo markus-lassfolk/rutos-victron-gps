@@ -1,0 +1,24 @@
+{
+  "name": "rutos-victron-gps",
+  "version": "1.0.0",
+  "description": "VenusOS GPS integration flows for RUTOS devices",
+  "main": "victron-gps-flow.json",
+  "scripts": {
+    "validate": "node-red-admin validate victron-gps-flow.json",
+    "deploy": "node-red-admin deploy victron-gps-flow.json"
+  },
+  "keywords": [
+    "rutos",
+    "victron",
+    "venus",
+    "gps",
+    "node-red",
+    "starlink"
+  ],
+  "author": "Markus Lassfolk",
+  "license": "MIT",
+  "dependencies": {
+    "node-red": "^3.0.0",
+    "node-red-contrib-victron": "^1.4.0"
+  }
+}

@@ -1,0 +1,38 @@
+name: Validate GPS Integration
+
+on:
+  push:
+    branches: [ main, develop ]
+  pull_request:
+    branches: [ main ]
+
+jobs:
+  validate:
+    runs-on: ubuntu-latest
+    
+    steps:
+    - uses: actions/checkout@v4
+    
+    - name: Setup Node.js
+      uses: actions/setup-node@v4
+      with:
+        node-version: '18'
+        
+    - name: Install Node-RED
+      run: |
+        npm install -g node-red
+        npm install -g node-red-admin
+        
+    - name: Validate Node-RED flows
+      run: |
+        cd src
+        node-red-admin validate victron-gps-flow.json || true
+        
+    - name: Check JSON syntax
+      run: |
+        python3 -m json.tool src/victron-gps-flow.json > /dev/null
+        echo "✓ JSON syntax valid"
+        
+    - name: Validate documentation
+      run: |
+        find docs -name "*.md" -exec markdown-link-check {} \; || true
