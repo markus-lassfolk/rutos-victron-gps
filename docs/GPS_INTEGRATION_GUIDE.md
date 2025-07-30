@@ -43,8 +43,8 @@ Install `grpcurl` via SSH:
 
 ```sh
 curl -fL https://github.com/fullstorydev/grpcurl/releases/download/v1.9.3/grpcurl_1.9.3_linux_armv7.tar.gz -o /tmp/grpcurl.tar.gz
-tar -zxvf /tmp/grpcurl.tar.gz -C /usr/local/bin/ grpcurl
-chmod +x /usr/local/bin/grpcurl
+tar -zxvf /tmp/grpcurl.tar.gz -C /usr/bin/ grpcurl
+chmod +x /usr/bin/grpcurl
 rm /tmp/grpcurl.tar.gz
 ```
 
