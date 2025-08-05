@@ -40,3 +40,8 @@ Thumbs.db
 # Local configuration
 config.local.json
 .env
+
+# Temp Folder 
+temp/ 
+
+

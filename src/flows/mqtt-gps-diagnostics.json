@@ -1,0 +1,197 @@
+[
+  {
+    "id": "mqtt_diagnostic_tab",
+    "type": "tab",
+    "label": "MQTT GPS Diagnostics",
+    "disabled": false,
+    "info": "Comprehensive MQTT GPS diagnostic flow for Cerbo GX at 192.168.80.242"
+  },
+  {
+    "id": "listen_all_gps",
+    "type": "mqtt in",
+    "z": "mqtt_diagnostic_tab",
+    "name": "Listen ALL GPS Topics",
+    "topic": "N/+/gps/+/+",
+    "qos": "0",
+    "datatype": "auto",
+    "broker": "diagnostic_broker",
+    "nl": false,
+    "rap": true,
+    "rh": 0,
+    "inputs": 0,
+    "x": 160,
+    "y": 80,
+    "wires": [
+      [
+        "gps_debug"
+      ]
+    ]
+  },
+  {
+    "id": "listen_device_serial",
+    "type": "mqtt in",
+    "z": "mqtt_diagnostic_tab",
+    "name": "Listen Device Serial",
+    "topic": "N/+/system/0/Serial",
+    "qos": "0",
+    "datatype": "auto",
+    "broker": "diagnostic_broker",
+    "nl": false,
+    "rap": true,
+    "rh": 0,
+    "inputs": 0,
+    "x": 160,
+    "y": 140,
+    "wires": [
+      [
+        "device_debug"
+      ]
+    ]
+  },
+  {
+    "id": "listen_device_instances",
+    "type": "mqtt in",
+    "z": "mqtt_diagnostic_tab",
+    "name": "Listen Device Instances",
+    "topic": "N/+/+/+/DeviceInstance",
+    "qos": "0",
+    "datatype": "auto",
+    "broker": "diagnostic_broker",
+    "nl": false,
+    "rap": true,
+    "rh": 0,
+    "inputs": 0,
+    "x": 160,
+    "y": 200,
+    "wires": [
+      [
+        "instance_debug"
+      ]
+    ]
+  },
+  {
+    "id": "test_gps_registration",
+    "type": "inject",
+    "z": "mqtt_diagnostic_tab",
+    "name": "Test GPS Registration",
+    "props": [
+      {
+        "p": "payload"
+      }
+    ],
+    "repeat": "",
+    "crontab": "",
+    "once": false,
+    "onceDelay": 0.1,
+    "topic": "",
+    "payload": "{\"value\":{\"Latitude\":60.1699,\"Longitude\":24.9384,\"Altitude\":10}}",
+    "payloadType": "json",
+    "x": 160,
+    "y": 300,
+    "wires": [
+      [
+        "gps_register_out"
+      ]
+    ]
+  },
+  {
+    "id": "gps_register_out",
+    "type": "mqtt out",
+    "z": "mqtt_diagnostic_tab",
+    "name": "Send Test GPS Data",
+    "topic": "N/b827ebfffe7fec6b/gps/1/Position",
+    "qos": "0",
+    "retain": "false",
+    "respTopic": "",
+    "contentType": "",
+    "userProps": "",
+    "correl": "",
+    "expiry": "",
+    "broker": "diagnostic_broker",
+    "x": 420,
+    "y": 300,
+    "wires": []
+  },
+  {
+    "id": "gps_debug",
+    "type": "debug",
+    "z": "mqtt_diagnostic_tab",
+    "name": "GPS Topics Debug",
+    "active": true,
+    "tosidebar": true,
+    "console": false,
+    "tostatus": false,
+    "complete": "true",
+    "targetType": "full",
+    "statusVal": "",
+    "statusType": "auto",
+    "x": 420,
+    "y": 80,
+    "wires": []
+  },
+  {
+    "id": "device_debug",
+    "type": "debug",
+    "z": "mqtt_diagnostic_tab",
+    "name": "Device Debug",
+    "active": true,
+    "tosidebar": true,
+    "console": false,
+    "tostatus": false,
+    "complete": "true",
+    "targetType": "full",
+    "statusVal": "",
+    "statusType": "auto",
+    "x": 420,
+    "y": 140,
+    "wires": []
+  },
+  {
+    "id": "instance_debug",
+    "type": "debug",
+    "z": "mqtt_diagnostic_tab",
+    "name": "Instance Debug",
+    "active": true,
+    "tosidebar": true,
+    "console": false,
+    "tostatus": false,
+    "complete": "true",
+    "targetType": "full",
+    "statusVal": "",
+    "statusType": "auto",
+    "x": 420,
+    "y": 200,
+    "wires": []
+  },
+  {
+    "id": "diagnostic_broker",
+    "type": "mqtt-broker",
+    "name": "Cerbo GX Diagnostics",
+    "broker": "192.168.80.242",
+    "port": "1883",
+    "clientid": "gps-diagnostics",
+    "autoConnect": true,
+    "usetls": false,
+    "protocolVersion": "4",
+    "keepalive": "60",
+    "cleansession": true,
+    "autoUnsubscribe": true,
+    "birthTopic": "",
+    "birthQos": "0",
+    "birthRetain": "false",
+    "birthPayload": "",
+    "birthMsg": {},
+    "closeTopic": "",
+    "closeQos": "0",
+    "closeRetain": "false",
+    "closePayload": "",
+    "closeMsg": {},
+    "willTopic": "",
+    "willQos": "0",
+    "willRetain": "false",
+    "willPayload": "",
+    "willMsg": {},
+    "userProps": "",
+    "sessionExpiry": ""
+  }
+]

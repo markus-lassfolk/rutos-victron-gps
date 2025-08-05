@@ -1,0 +1,400 @@
+[
+  {
+    "id": "gps_registration_module",
+    "type": "tab",
+    "label": "GPS Registration & Verification Module",
+    "disabled": false,
+    "info": "Standalone GPS Registration & Verification Module\n\n🎯 PURPOSE:\nReusable GPS device registration and verification system that can be easily copied into any GPS flow.\n\n🔧 WHAT IT DOES:\n1. Discovers Cerbo GX device ID automatically\n2. Registers a GPS device with Venus OS\n3. Learns VRM Portal ID and GPS instance\n4. Verifies GPS data is being received\n5. Provides status monitoring and health checks\n\n📋 PROVIDES THESE GLOBAL/FLOW VARIABLES:\n- global.vrm_portal_id (VRM Portal ID for GPS publishing)\n- flow.gps_instance (GPS device instance number)\n- flow.gps_publishing_enabled (boolean - ready to publish GPS data)\n- flow.discovered_device_id (Cerbo GX device ID)\n- flow.gps_client_id (Registered GPS client ID)\n\n🚀 HOW TO USE:\n1. Copy this entire flow tab into your Node-RED workspace\n2. Update the MQTT broker configuration to match your setup\n3. The module will automatically start working\n4. Your main GPS flow can check flow.gps_publishing_enabled before publishing\n5. Use global.vrm_portal_id and flow.gps_instance when publishing GPS data\n\n✅ INTEGRATION EXAMPLE:\nIn your GPS publishing function, check:\nif (!flow.get('gps_publishing_enabled')) {\n    node.warn('GPS registration not ready yet');\n    return null;\n}\nconst portalId = global.get('vrm_portal_id');\nconst gpsInstance = flow.get('gps_instance');\n// Now publish to W/{portalId}/gps/{gpsInstance}/...\n\n🔍 MONITORING:\nWatch the \"GPS Registration Status\" debug output for real-time status updates."
+  },
+  {
+    "id": "device_discovery_listener",
+    "type": "mqtt in",
+    "z": "gps_registration_module",
+    "name": "Device ID Discovery",
+    "topic": "N/+/system/0/Serial",
+    "qos": "2",
+    "datatype": "auto-detect",
+    "broker": "mqtt_broker_config",
+    "nl": false,
+    "rap": true,
+    "rh": 0,
+    "inputs": 0,
+    "x": 160,
+    "y": 80,
+    "wires": [
+      [
+        "device_id_parser"
+      ]
+    ]
+  },
+  {
+    "id": "device_id_parser",
+    "type": "json",
+    "z": "gps_registration_module",
+    "name": "Parse Device Serial",
+    "property": "payload",
+    "action": "",
+    "pretty": false,
+    "x": 380,
+    "y": 80,
+    "wires": [
+      [
+        "device_id_learner"
+      ]
+    ]
+  },
+  {
+    "id": "device_id_learner",
+    "type": "function",
+    "z": "gps_registration_module",
+    "name": "Learn Device ID & Trigger Registration",
+    "func": "// Extract device ID from N/{deviceId}/system/0/Serial topic\nconst topic = msg.topic || '';\nconst deviceMatch = topic.match(/N\\/([^/]+)\\/system\\/0\\/Serial/);\n\nif (!deviceMatch) {\n    node.warn(`Invalid device serial topic: ${topic}`);\n    return null;\n}\n\nconst deviceId = deviceMatch[1];\nconst serialData = msg.payload;\n\n// Store the discovered device ID\nflow.set('discovered_device_id', deviceId);\nflow.set('device_serial_data', serialData);\nflow.set('device_discovery_time', Date.now());\n\nnode.status({\n    fill: \"green\",\n    shape: \"dot\",\n    text: `Device ID: ${deviceId} - Triggering GPS registration`\n});\n\nnode.warn(`✅ DEVICE ID DISCOVERED: ${deviceId} - Will register GPS device`);\n\n// Immediately trigger GPS device registration\nreturn {\n    payload: {\n        action: \"device_discovered\",\n        device_id: deviceId,\n        serial_data: serialData,\n        discovered_at: new Date().toISOString()\n    }\n};",
+    "outputs": 1,
+    "timeout": "",
+    "noerr": 0,
+    "initialize": "",
+    "finalize": "",
+    "libs": [],
+    "x": 650,
+    "y": 40,
+    "wires": [
+      [
+        "device_discovery_debug",
+        "gps_device_registrar"
+      ]
+    ]
+  },
+  {
+    "id": "device_discovery_debug",
+    "type": "debug",
+    "z": "gps_registration_module",
+    "name": "Device Discovery",
+    "active": true,
+    "tosidebar": true,
+    "console": false,
+    "tostatus": false,
+    "complete": "payload",
+    "targetType": "msg",
+    "statusVal": "",
+    "statusType": "auto",
+    "x": 970,
+    "y": 40,
+    "wires": []
+  },
+  {
+    "id": "gps_device_registrar",
+    "type": "function",
+    "z": "gps_registration_module",
+    "name": "GPS Device Registration",
+    "func": "// Register GPS device using Venus OS device registration protocol\nconst deviceId = msg.payload?.device_id || flow.get('discovered_device_id');\n\nif (!deviceId) {\n    node.warn('No device ID available for GPS registration');\n    return null;\n}\n\n// Create GPS device registration message\nconst gpsClientId = `starlink_gps_${deviceId.slice(-4)}`; // Unique GPS client ID\nconst registrationPayload = {\n    clientId: gpsClientId,\n    connected: 1,\n    version: \"v1.0.0\",\n    services: {\n        gps1: \"gps\"  // Register GPS service with instance 1\n    }\n};\n\n// Store GPS registration info\nflow.set('gps_client_id', gpsClientId);\nflow.set('gps_registration_time', Date.now());\nflow.set('target_device_id', deviceId);\n\nnode.status({\n    fill: \"blue\",\n    shape: \"dot\",\n    text: `Registering GPS: ${gpsClientId} → ${deviceId}`\n});\n\nnode.warn(`📡 REGISTERING GPS DEVICE: ${gpsClientId} for Cerbo GX: ${deviceId}`);\n\nreturn {\n    topic: `device/${gpsClientId}/Status`,\n    payload: registrationPayload\n};",
+    "outputs": 1,
+    "timeout": "",
+    "noerr": 0,
+    "initialize": "",
+    "finalize": "",
+    "libs": [],
+    "x": 970,
+    "y": 80,
+    "wires": [
+      [
+        "gps_registration_mqtt",
+        "gps_registration_debug"
+      ]
+    ]
+  },
+  {
+    "id": "gps_registration_mqtt",
+    "type": "mqtt out",
+    "z": "gps_registration_module",
+    "name": "Send GPS Registration",
+    "topic": "",
+    "qos": "2",
+    "retain": "false",
+    "respTopic": "",
+    "contentType": "",
+    "userProps": "",
+    "correl": "",
+    "expiry": "",
+    "broker": "mqtt_broker_config",
+    "x": 1280,
+    "y": 80,
+    "wires": []
+  },
+  {
+    "id": "gps_registration_debug",
+    "type": "debug",
+    "z": "gps_registration_module",
+    "name": "GPS Registration",
+    "active": true,
+    "tosidebar": true,
+    "console": false,
+    "tostatus": false,
+    "complete": "true",
+    "targetType": "full",
+    "statusVal": "",
+    "statusType": "auto",
+    "x": 1280,
+    "y": 40,
+    "wires": []
+  },
+  {
+    "id": "vrm_ids_listener",
+    "type": "mqtt in",
+    "z": "gps_registration_module",
+    "name": "VRM IDs Listener",
+    "topic": "device/+/DBus",
+    "qos": "2",
+    "datatype": "auto-detect",
+    "broker": "mqtt_broker_config",
+    "nl": false,
+    "rap": true,
+    "rh": 0,
+    "inputs": 0,
+    "x": 150,
+    "y": 160,
+    "wires": [
+      [
+        "vrm_ids_extractor"
+      ]
+    ]
+  },
+  {
+    "id": "vrm_ids_extractor",
+    "type": "function",
+    "z": "gps_registration_module",
+    "name": "Extract VRM Portal & GPS Instance",
+    "func": "// Extract VRM Portal ID and GPS instance from DBus response\nconst topic = msg.topic || '';\nconst payload = msg.payload || {};\n\n// Extract client ID from topic\nconst clientMatch = topic.match(/device\\/([^/]+)\\/DBus/);\nif (!clientMatch) {\n    return null;\n}\n\nconst clientId = clientMatch[1];\nconst expectedClientId = flow.get('gps_client_id');\n\n// Only process DBus messages from our registered GPS device\nif (expectedClientId && clientId === expectedClientId) {\n    const portalId = payload.portalId;\n    const gpsInstance = payload.deviceInstance?.gps1;\n    \n    if (portalId && gpsInstance !== undefined) {\n        // Store VRM identifiers globally (accessible by other flows)\n        global.set('vrm_portal_id', portalId);\n        flow.set('gps_instance', gpsInstance);\n        flow.set('vrm_ids_learned_time', Date.now());\n        \n        node.status({\n            fill: \"green\",\n            shape: \"dot\",\n            text: `VRM Portal: ${portalId}, GPS Instance: ${gpsInstance}`\n        });\n        \n        node.warn(`✅ VRM IDs LEARNED: Portal=${portalId}, GPS Instance=${gpsInstance}`);\n        \n        // Signal that GPS registration is complete and ready for data publishing\n        return {\n            payload: {\n                action: \"vrm_ids_learned\",\n                portal_id: portalId,\n                gps_instance: gpsInstance,\n                client_id: clientId,\n                learned_at: new Date().toISOString()\n            }\n        };\n    }\n}\n\nreturn null;",
+    "outputs": 1,
+    "timeout": "",
+    "noerr": 0,
+    "initialize": "",
+    "finalize": "",
+    "libs": [],
+    "x": 440,
+    "y": 160,
+    "wires": [
+      [
+        "vrm_ids_debug",
+        "enable_gps_publishing"
+      ]
+    ]
+  },
+  {
+    "id": "vrm_ids_debug",
+    "type": "debug",
+    "z": "gps_registration_module",
+    "name": "VRM IDs Learned",
+    "active": true,
+    "tosidebar": true,
+    "console": false,
+    "tostatus": false,
+    "complete": "payload",
+    "targetType": "msg",
+    "statusVal": "",
+    "statusType": "auto",
+    "x": 770,
+    "y": 120,
+    "wires": []
+  },
+  {
+    "id": "enable_gps_publishing",
+    "type": "function",
+    "z": "gps_registration_module",
+    "name": "Enable GPS Publishing",
+    "func": "// Enable GPS data publishing now that registration is complete\nconst portalId = msg.payload.portal_id;\nconst gpsInstance = msg.payload.gps_instance;\nconst clientId = msg.payload.client_id;\n\n// Set the global flag that other flows can check\nflow.set('gps_publishing_enabled', true);\nflow.set('gps_ready_time', Date.now());\n\nnode.status({\n    fill: \"green\",\n    shape: \"dot\",\n    text: `GPS Ready: Portal ${portalId}, Instance ${gpsInstance}`\n});\n\nnode.warn(`🚀 GPS REGISTRATION COMPLETE - Other flows can now publish GPS data`);\nnode.warn(`📊 Use: global.get('vrm_portal_id') = ${portalId}`);\nnode.warn(`📊 Use: flow.get('gps_instance') = ${gpsInstance}`);\n\nreturn {\n    payload: {\n        action: \"gps_publishing_enabled\",\n        portal_id: portalId,\n        gps_instance: gpsInstance,\n        ready: true,\n        enabled_at: new Date().toISOString()\n    }\n};",
+    "outputs": 1,
+    "timeout": "",
+    "noerr": 0,
+    "initialize": "",
+    "finalize": "",
+    "libs": [],
+    "x": 770,
+    "y": 160,
+    "wires": [
+      [
+        "gps_ready_debug"
+      ]
+    ]
+  },
+  {
+    "id": "gps_ready_debug",
+    "type": "debug",
+    "z": "gps_registration_module",
+    "name": "GPS Ready",
+    "active": true,
+    "tosidebar": true,
+    "console": false,
+    "tostatus": false,
+    "complete": "payload",
+    "targetType": "msg",
+    "statusVal": "",
+    "statusType": "auto",
+    "x": 1070,
+    "y": 160,
+    "wires": []
+  },
+  {
+    "id": "gps_verification_listener",
+    "type": "mqtt in",
+    "z": "gps_registration_module",
+    "name": "GPS Verification Listener",
+    "topic": "N/+/gps/+/Position/+",
+    "qos": "0",
+    "datatype": "json",
+    "broker": "mqtt_broker_config",
+    "nl": false,
+    "rap": true,
+    "rh": 0,
+    "inputs": 0,
+    "x": 170,
+    "y": 240,
+    "wires": [
+      [
+        "verify_gps_success"
+      ]
+    ]
+  },
+  {
+    "id": "verify_gps_success",
+    "type": "function",
+    "z": "gps_registration_module",
+    "name": "Verify GPS Data Success",
+    "func": "// Verify that our GPS data is being received by Venus OS\nconst topic = msg.topic || '';\nconst payload = msg.payload || {};\nconst value = payload.value;\n\n// Extract portal, device instance, and field from topic\nconst topicMatch = topic.match(/N\\/([^/]+)\\/gps\\/(\\d+)\\/Position\\/(.+)/);\nif (!topicMatch) {\n    return null;\n}\n\nconst portalId = topicMatch[1];\nconst gpsInstance = parseInt(topicMatch[2]);\nconst field = topicMatch[3]; // Latitude or Longitude\n\n// Check if this matches our registered GPS\nconst ourPortalId = global.get('vrm_portal_id');\nconst ourGpsInstance = flow.get('gps_instance');\n\nconst isOurGPS = ourPortalId && ourGpsInstance !== undefined && \n                portalId === ourPortalId && gpsInstance === ourGpsInstance;\n\nif (isOurGPS) {\n    // Track successful GPS data confirmation\n    flow.set('last_gps_confirmed', Date.now());\n    flow.set('last_confirmed_field', field);\n    flow.set('last_confirmed_value', value);\n    \n    node.status({\n        fill: \"green\",\n        shape: \"dot\",\n        text: `✅ GPS ${field}: ${value} confirmed`\n    });\n    \n    node.warn(`✅ GPS DATA CONFIRMED: ${field}=${value} from our registered GPS device`);\n} else {\n    node.status({\n        fill: \"blue\",\n        shape: \"ring\",\n        text: `GPS ${field}: ${value} from other device`\n    });\n}\n\nreturn {\n    payload: {\n        portal_id: portalId,\n        gps_instance: gpsInstance,\n        field: field,\n        value: value,\n        is_our_gps: isOurGPS,\n        our_portal_id: ourPortalId,\n        our_gps_instance: ourGpsInstance,\n        timestamp: new Date().toISOString()\n    }\n};",
+    "outputs": 1,
+    "timeout": "",
+    "noerr": 0,
+    "initialize": "",
+    "finalize": "",
+    "libs": [],
+    "x": 490,
+    "y": 240,
+    "wires": [
+      [
+        "gps_verification_debug"
+      ]
+    ]
+  },
+  {
+    "id": "gps_verification_debug",
+    "type": "debug",
+    "z": "gps_registration_module",
+    "name": "GPS Verification",
+    "active": true,
+    "tosidebar": true,
+    "console": false,
+    "tostatus": false,
+    "complete": "payload",
+    "targetType": "msg",
+    "statusVal": "",
+    "statusType": "auto",
+    "x": 740,
+    "y": 240,
+    "wires": []
+  },
+  {
+    "id": "registration_status_monitor",
+    "type": "function",
+    "z": "gps_registration_module",
+    "name": "GPS Registration Status Monitor",
+    "func": "// Comprehensive GPS registration status monitoring\nconst now = Date.now();\nconst discoveredDeviceId = flow.get('discovered_device_id');\nconst gpsClientId = flow.get('gps_client_id');\nconst portalId = global.get('vrm_portal_id');\nconst gpsInstance = flow.get('gps_instance');\nconst publishingEnabled = flow.get('gps_publishing_enabled');\nconst lastConfirmed = flow.get('last_gps_confirmed') || 0;\n\nconst status = {\n    module_name: \"GPS Registration & Verification Module\",\n    timestamp: new Date().toISOString(),\n    \n    device_discovery: {\n        cerbo_device_id: discoveredDeviceId || 'Not discovered',\n        discovered: !!discoveredDeviceId,\n        discovery_time: flow.get('device_discovery_time')\n    },\n    \n    gps_registration: {\n        gps_client_id: gpsClientId || 'Not registered',\n        registered: !!gpsClientId,\n        registration_time: flow.get('gps_registration_time')\n    },\n    \n    vrm_integration: {\n        portal_id: portalId || 'Unknown',\n        gps_instance: gpsInstance !== undefined ? gpsInstance : 'Unknown',\n        vrm_ids_learned: !!(portalId && gpsInstance !== undefined),\n        ids_learned_time: flow.get('vrm_ids_learned_time')\n    },\n    \n    publishing_readiness: {\n        enabled: publishingEnabled || false,\n        ready_time: flow.get('gps_ready_time'),\n        variables_set: {\n            global_vrm_portal_id: !!global.get('vrm_portal_id'),\n            flow_gps_instance: flow.get('gps_instance') !== undefined,\n            flow_gps_publishing_enabled: !!flow.get('gps_publishing_enabled')\n        }\n    },\n    \n    verification: {\n        last_confirmed: lastConfirmed > 0 ? new Date(lastConfirmed).toISOString() : 'Never',\n        recently_confirmed: lastConfirmed > 0 && (now - lastConfirmed) < 120000,\n        confirmed_field: flow.get('last_confirmed_field'),\n        confirmed_value: flow.get('last_confirmed_value')\n    },\n    \n    overall_health: {\n        status: 'CHECKING',\n        issues: []\n    }\n};\n\n// Determine overall health\nif (!status.device_discovery.discovered) {\n    status.overall_health.issues.push('❌ Cerbo GX device ID not discovered');\n}\nif (!status.gps_registration.registered) {\n    status.overall_health.issues.push('❌ GPS device not registered');\n}\nif (!status.vrm_integration.vrm_ids_learned) {\n    status.overall_health.issues.push('❌ VRM Portal ID and GPS instance not learned');\n}\nif (!status.publishing_readiness.enabled) {\n    status.overall_health.issues.push('❌ GPS publishing not enabled');\n}\nif (!status.verification.recently_confirmed) {\n    status.overall_health.issues.push('⚠️ GPS data not recently confirmed by Venus OS');\n}\n\n// Set overall status\nif (status.overall_health.issues.length === 0) {\n    status.overall_health.status = '🟢 HEALTHY - Ready for GPS publishing';\n} else if (status.overall_health.issues.filter(i => i.startsWith('❌')).length === 0) {\n    status.overall_health.status = '🟡 OPERATIONAL - Minor issues';\n} else if (status.publishing_readiness.enabled) {\n    status.overall_health.status = '🟡 DEGRADED - Ready but with issues';\n} else {\n    status.overall_health.status = '🔴 NOT READY - Major issues';\n}\n\n// Set node status\nconst statusEmojis = {\n    '🟢 HEALTHY - Ready for GPS publishing': { fill: 'green', shape: 'dot' },\n    '🟡 OPERATIONAL - Minor issues': { fill: 'yellow', shape: 'dot' },\n    '🟡 DEGRADED - Ready but with issues': { fill: 'yellow', shape: 'ring' },\n    '🔴 NOT READY - Major issues': { fill: 'red', shape: 'ring' }\n};\n\nconst nodeStatus = statusEmojis[status.overall_health.status] || { fill: 'blue', shape: 'ring' };\nnode.status({\n    ...nodeStatus,\n    text: `${status.overall_health.status} | Issues: ${status.overall_health.issues.length}`\n});\n\nreturn { payload: status };",
+    "outputs": 1,
+    "timeout": "",
+    "noerr": 0,
+    "initialize": "",
+    "finalize": "",
+    "libs": [],
+    "x": 550,
+    "y": 380,
+    "wires": [
+      [
+        "registration_status_debug"
+      ]
+    ]
+  },
+  {
+    "id": "registration_status_debug",
+    "type": "debug",
+    "z": "gps_registration_module",
+    "name": "GPS Registration Status",
+    "active": true,
+    "tosidebar": true,
+    "console": false,
+    "tostatus": false,
+    "complete": "payload",
+    "targetType": "msg",
+    "statusVal": "",
+    "statusType": "auto",
+    "x": 610,
+    "y": 500,
+    "wires": []
+  },
+  {
+    "id": "status_check_timer",
+    "type": "inject",
+    "z": "gps_registration_module",
+    "name": "Status Check Every 30s",
+    "props": [],
+    "repeat": "30",
+    "crontab": "",
+    "once": true,
+    "onceDelay": 2,
+    "topic": "",
+    "x": 190,
+    "y": 380,
+    "wires": [
+      [
+        "registration_status_monitor"
+      ]
+    ]
+  },
+  {
+    "id": "manual_status_check",
+    "type": "inject",
+    "z": "gps_registration_module",
+    "name": "Manual Status Check",
+    "props": [],
+    "repeat": "",
+    "crontab": "",
+    "once": false,
+    "onceDelay": 0.1,
+    "topic": "",
+    "x": 180,
+    "y": 520,
+    "wires": [
+      [
+        "registration_status_monitor"
+      ]
+    ]
+  },
+  {
+    "id": "mqtt_broker_config",
+    "type": "mqtt-broker",
+    "name": "Cerbo GX MQTT Broker",
+    "broker": "192.168.80.242",
+    "port": "1883",
+    "clientid": "",
+    "autoConnect": true,
+    "usetls": false,
+    "protocolVersion": "4",
+    "keepalive": "60",
+    "cleansession": true,
+    "autoUnsubscribe": true,
+    "birthTopic": "",
+    "birthQos": "0",
+    "birthRetain": "false",
+    "birthPayload": "",
+    "birthMsg": {},
+    "closeTopic": "",
+    "closeQos": "0",
+    "closeRetain": "false",
+    "closePayload": "",
+    "closeMsg": {},
+    "willTopic": "",
+    "willQos": "0",
+    "willRetain": "false",
+    "willPayload": "",
+    "willMsg": {},
+    "userProps": "",
+    "sessionExpiry": ""
+  }
+]
