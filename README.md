@@ -4,139 +4,210 @@
 ![VenusOS](https://img.shields.io/badge/VenusOS-Compatible-blue)
 ![Status](https://img.shields.io/badge/Status-Production_Ready-brightgreen)
 
-## 🎯 Project Overview
+A robust GPS integration solution for Victron Energy systems using Node-RED, designed for Venus OS environments with RUTOS-based routers and Starlink connectivity.
 
-This repository contains **production-ready Node-RED flows** for GPS integration with Victron Venus OS systems, supporting both Starlink and RUTOS GPS sources with intelligent accuracy-based source selection.
+## 🌟 Features
 
-Provides real-time GPS data integration for Victron Energy systems by:
-- Automatically selecting the most accurate GPS source (RUTOS or Starlink)
-- Registering GPS devices with Venus OS via MQTT
-- Publishing GPS coordinates, altitude, speed, and fix status
-- Monitoring GPS data quality and connection health
-- Managing GPS device lifecycle (registration/removal)
+- **Dual GPS Sources**: RUTOS GPS (high precision ~0.4m) + Starlink GPS (backup ~5-7m)
+- **Automatic GPS Registration**: Self-registering GPS device on Venus OS
+- **Smart Source Selection**: Always uses the most accurate available GPS source
+- **Automatic Device Discovery**: Handles Victron system reboots and changes
+- **Movement Detection**: Intelligent position change detection using Haversine distance
+- **MQTT Communication**: Native integration with Venus OS via MQTT
+- **Diagnostic Tools**: Built-in GPS device management and diagnostics
 
-## 🚀 Key Features
+## 📋 Requirements
 
-- **Multi-source GPS:** Intelligently selects between RUTOS (~1m accuracy) and Starlink (~7m accuracy)
-- **Data-driven thresholds:** Uses real-world measurements for accuracy filtering
-- **Automatic registration:** Discovers and registers GPS devices with Venus OS
-- **Smart movement detection:** Haversine distance calculations for precise movement tracking
-- **Manual overrides:** MQTT control interface for source selection and configuration
-- **Comprehensive diagnostics:** Real-time monitoring and health checks
-- **Error handling:** Fallback mechanisms and degraded source detection
+- **Venus OS** system (Victron Energy)
+- **Node-RED** installed on Venus OS
+- **RUTOS-based router** with GPS capability
+- **MQTT broker** access on Venus OS (typically built-in)
+- **Network connectivity** to both router and Starlink (if available)
 
-## 📁 Repository Structure
+## 📁 Solution Components
 
+### Core Node-RED Flows
+
+1. **`enhanced-victron-gps-control.json`** - Main GPS integration flow
+   - Dual GPS source management (RUTOS + Starlink)
+   - Smart GPS selection logic based on accuracy
+   - MQTT publishing to Venus OS
+   - Movement detection and position filtering
+   - Data-driven accuracy thresholds
+
+2. **`gps-registration-verification-module.json`** - GPS device registration
+   - Automatic GPS device registration with Venus OS
+   - VRM Portal ID discovery and learning
+   - GPS instance management and discovery
+   - Handle Venus OS reboots and reconfigurations
+
+3. **`mqtt-gps-diagnostics.json`** - MQTT diagnostic tools
+   - GPS topic monitoring and debugging
+   - Device discovery and verification
+   - MQTT traffic analysis
+   - Troubleshooting utilities
+
+4. **`fixed-gps-scanner-remover.json`** - GPS device management
+   - Scan for existing GPS devices
+   - Remove orphaned or conflicting GPS devices
+   - Device cleanup and maintenance utilities
+
+## 🚀 Quick Start
+
+### 1. Import Node-RED Flows
+
+1. **Access Node-RED** on your Venus OS system (typically `http://venus-os-ip:1880`)
+2. **Import flows** using the Node-RED import function:
+   - Click the hamburger menu → Import
+   - Select "Upload file" for each `.json` flow file in `src/flows/`
+   - Import all four core flows
+
+### 2. Configure Network Settings
+
+Update the following network settings in all flows:
+
+- **Venus OS MQTT Broker**: Update to your Venus OS IP address
+- **RUTOS Router**: Default `192.168.1.1` (update if different)
+- **Starlink Terminal**: Default `192.168.100.1` (if available)
+
+### 3. Configure Authentication
+
+**Method 1: Node-RED Context Store (Recommended)**
+
+Create a temporary function node with this code, inject once, then delete:
+
+```javascript
+// Set RUTOS router credentials
+flow.set('rutos_credentials', {
+    username: 'your_router_username',
+    password: 'your_router_password'
+});
+
+node.log('✅ Credentials stored in Node-RED context');
+return {payload: 'Credentials configured'};
 ```
-rutos-victron-gps/
-├── src/
-│   ├── flows/                     # Working Node-RED flows (PRODUCTION READY)
-│   │   ├── enhanced-victron-gps-control.json
-│   │   ├── mqtt-gps-diagnostics.json  
-│   │   ├── gps-registration-verification-module.json
-│   │   ├── fixed-gps-scanner-remover.json
-│   │   └── README.md              # Flow documentation
-│   ├── scripts/                   # Utility scripts and tools
-│   │   ├── GPS accuracy analysis scripts
-│   │   ├── Test and control scripts  
-│   │   └── PowerShell utilities
-│   ├── config/                    # Configuration files
-│   └── package.json               # Node-RED dependencies
-├── docs/                          # Documentation
-│   ├── GPS_INTEGRATION_GUIDE.md   # Setup and integration guide
-│   ├── rutos-setup.md            # RUTOS GPS configuration  
-│   ├── venusOS-setup.md          # Venus OS setup instructions
-│   ├── troubleshooting.md        # Common issues and solutions
-│   ├── reference/                # Reference documentation
-│   └── guides/                   # Additional guides
-├── assets/                       # Images and media
-├── temp/                         # Development files and archives
-└── README.md                     # This file
-```
 
-## 🏗️ System Architecture
+**Method 2: Environment Variables**
 
-```
-GPS Sources:
-┌─────────────┐    ┌─────────────┐
-│   Starlink  │    │    RUTOS    │
-│ gRPC:9200   │    │ HTTPS API   │
-│ ~7m accuracy│    │ ~1m accuracy│
-└──────┬──────┘    └──────┬──────┘
-       │                  │
-       └─────────┬────────┘
-                 │
-┌────────────────▼────────────────┐
-│   Enhanced GPS Control Flow    │
-│   • Source selection logic     │
-│   • Data validation           │  
-│   • Movement detection        │
-└────────────────┬────────────────┘
-                 │
-┌────────────────▼────────────────┐
-│   GPS Registration Module      │
-│   • Device discovery           │
-│   • Venus OS registration      │
-│   • VRM Portal ID learning     │
-└────────────────┬────────────────┘
-                 │
-┌────────────────▼────────────────┐
-│     Victron Venus OS           │  
-│     Cerbo GX: 192.168.80.242   │
-│     MQTT Broker                 │
-└─────────────────────────────────┘
-```
+On Venus OS command line:
 
-## 📋 Quick Start
-
-### Prerequisites
-- RUTOS device (RUTX09, RUTX11, RUTX14, etc.)
-- VenusOS system (Cerbo GX, Venus GX, etc.)
-- Network connectivity between devices
-
-### Installation
 ```bash
-# Clone repository
-git clone https://github.com/markus-lassfolk/rutos-victron-gps.git
-cd rutos-victron-gps
-
-# Deploy to RUTOS device
-scp src/victron-gps-flow.json root@your-rutos-ip:/etc/
+export RUTOS_USERNAME="your_username"
+export RUTOS_PASSWORD="your_password"
+systemctl restart nodered
 ```
+
+### 4. Deploy and Test
+
+1. **Deploy all flows** in Node-RED
+2. **Monitor debug output** for GPS data flow
+3. **Check Venus OS** - GPS device should appear in device list
+4. **Verify in VRM Portal** - Position updates should appear
+
+## 🛠️ Configuration
+
+### GPS Accuracy Thresholds
+
+The system uses optimized thresholds based on real-world testing:
+
+- **RUTOS Accuracy**: 1m threshold (typical: 0.4-0.5m accuracy)
+- **Starlink Accuracy**: 7m threshold (typical: 5-6m accuracy)
+- **Position Change**: 6m minimum distance for position updates
+- **Altitude Change**: 18m minimum change for altitude updates
+- **Speed Threshold**: 0.1 m/s minimum for speed-based updates
+
+### Network Endpoints
+
+Default configuration:
+- **RUTOS Router**: `http://192.168.1.1/cgi-bin/luci/rpc/uci`
+- **Starlink gRPC**: `http://192.168.100.1:9200`
+- **Venus OS MQTT**: `localhost:1883` (from Node-RED context)
 
 ## 📖 Documentation
 
-- [GPS Integration Guide](docs/GPS_INTEGRATION_GUIDE.md)
-- [VenusOS Configuration](docs/venusOS-setup.md)
-- [RUTOS Setup](docs/rutos-setup.md)
-- [Troubleshooting](docs/troubleshooting.md)
+- **[GPS Integration Guide](docs/GPS_INTEGRATION_GUIDE.md)** - Comprehensive setup guide
+- **[RUTOS Setup](docs/rutos-setup.md)** - Router configuration instructions
+- **[Venus OS Setup](docs/venusOS-setup.md)** - Venus OS specific configuration
+- **[Troubleshooting](docs/troubleshooting.md)** - Common issues and solutions
 
-## 🔧 Configuration
+## 🔧 How It Works
 
-The integration uses Node-RED flows for data processing:
+### GPS Source Selection Logic
 
-```json
-{
-  "id": "victron-gps-flow",
-  "type": "tab",
-  "label": "VenusOS GPS Integration"
-}
-```
+1. **Primary**: RUTOS GPS (when available and accurate < 1m)
+2. **Fallback**: Starlink GPS (when RUTOS unavailable or inaccurate)
+3. **Intelligent Switching**: Automatic source switching based on real-time accuracy
 
-## 🤝 Related Projects
+### Automatic Device Registration
 
-- [RUTOS Starlink Solution](https://github.com/markus-lassfolk/rutos-starlink-victron) - Main Starlink monitoring and failover
-- [VenusOS Documentation](https://github.com/victronenergy/venus/wiki)
+- **Discovery**: Finds Venus OS portal ID automatically
+- **Registration**: Creates GPS device with unique instance
+- **Persistence**: Survives Venus OS reboots and updates
+- **Conflict Resolution**: Handles multiple GPS device scenarios
+
+### Movement Detection
+
+- **Haversine Distance**: Accurate distance calculations accounting for Earth curvature
+- **Smart Filtering**: Reduces unnecessary updates from GPS jitter
+- **Configurable Thresholds**: Customizable for different use cases
+- **Status Monitoring**: Real-time accuracy and connection status
+
+## 🚨 Troubleshooting
+
+### Common Issues
+
+| Issue | Cause | Solution |
+|-------|-------|----------|
+| **GPS not appearing in Venus OS** | Registration failure | Check MQTT connectivity and portal ID |
+| **Authentication errors** | Wrong credentials | Verify RUTOS username/password |
+| **Position not updating** | Threshold too high | Check movement detection settings |
+| **JSON parsing errors** | Network timeout | Check network connectivity to sources |
+
+### Debug Tools
+
+The diagnostic flows provide:
+
+- **MQTT Traffic Monitor** - See all GPS-related MQTT messages
+- **Device Scanner** - Find existing GPS devices and conflicts
+- **Connection Tester** - Test individual GPS source connections
+- **Data Flow Tracer** - Follow GPS data through the entire pipeline
+
+### Log Analysis
+
+Monitor Node-RED debug output for:
+- `✅` GPS data successfully processed
+- `⚠️` Fallback to secondary GPS source
+- `❌` Connection or authentication failures
+- `🔍` Device discovery and registration events
+
+## 🔒 Security Considerations
+
+- **Credential Storage**: Use Node-RED context store (encrypted) instead of hardcoded values
+- **Network Security**: Ensure MQTT and HTTP connections are on trusted networks
+- **Access Control**: Restrict Node-RED interface access to authorized users
+- **Updates**: Keep Venus OS and Node-RED updated for security patches
+
+## 🤝 Contributing
+
+Contributions welcome! Areas for improvement:
+- Additional GPS source integrations
+- Enhanced error handling and recovery
+- Performance optimizations
+- Documentation improvements
+- Testing on additional hardware configurations
 
 ## 📄 License
 
-MIT License - see [LICENSE](LICENSE) file for details.
+Open source under MIT License. See individual files for specific licensing.
 
-## 🙏 Acknowledgments
+## 📊 Performance
 
-- Victron Energy for VenusOS
-- Teltonika for RUTOS platform
-- SpaceX for Starlink connectivity
+Typical performance metrics:
+- **GPS Update Rate**: Every 10-30 seconds (configurable)
+- **Position Accuracy**: 0.4-0.5m (RUTOS), 5-7m (Starlink)
+- **Network Latency**: <100ms for local RUTOS, <500ms for Starlink
+- **Resource Usage**: Minimal impact on Venus OS performance
 
 ---
-*Part of the RUTOS ecosystem for enhanced connectivity and monitoring*
+
+**Production Ready**: This solution is actively used in marine and mobile installations with Victron Energy systems.

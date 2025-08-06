@@ -8,16 +8,35 @@ The Victron system's solar forecast relies on knowing the vessel or vehicle's pr
 
 ## How It Works
 
-The entire logic is contained within a single Node-RED flow running on the Cerbo GX.
+The solution consists of four integrated Node-RED flows that work together:
 
-- **Trigger:** Every 30 minutes, the flow is triggered to begin the data gathering process.
-- **Data Fetching:** It makes two simultaneous API calls to poll for location data:
-  - One to the Teltonika RUTX50 API to get its GPS data (latitude, longitude, altitude, accuracy, etc.).
-  - One to the Starlink gRPC API to get its diagnostic data, which includes GPS location.
-- **Quality Check & Selection:** A central function node analyzes the data from both sources. It prioritizes the RUTOS GPS due to its typically higher accuracy but will seamlessly fail over to the Starlink GPS if the RUTOS signal is poor or unavailable. The selection is based on GPS fix status and horizontal accuracy (hAcc).
-- **Format & Publish:** The data from the selected source is formatted into the specific JSON structure required by the Victron D-Bus service.
-- **MQTT Injection:** The formatted GPS data is published to the Cerbo's local MQTT broker. The Victron system listens to these specific MQTT topics and updates the system's official location accordingly.
-- **Movement Detection & Obstruction Map Reset:** The flow includes a powerful secondary function: it calculates the distance moved since the last successful GPS update. If the vehicle has moved more than 500 meters, it automatically triggers a command to reset the Starlink dish's obstruction map. This is crucial for mobile users, as it ensures Starlink immediately begins scanning for a clear view of the sky at each new location, optimizing performance.
+**Main GPS Integration Flow:**
+- **Trigger:** Every 30 seconds, polls GPS sources for location data
+- **Dual Data Fetching:** Simultaneously queries RUTOS API and Starlink gRPC for GPS data
+- **Intelligent Source Selection:** Prioritizes RUTOS GPS for accuracy (~0.4m) with automatic Starlink fallback (~5-7m)
+- **Quality Assessment:** Analyzes GPS fix status, accuracy, and satellite count to select optimal source
+- **MQTT Publishing:** Formats and publishes GPS data to Venus OS via local MQTT broker
+
+**GPS Device Registration Flow:**
+- **Auto-Discovery:** Automatically discovers VRM Portal ID and GPS device instances
+- **Smart Registration:** Registers GPS device with Venus OS D-Bus system
+- **Reboot Handling:** Handles Venus OS reboots and automatically re-registers GPS device
+- **Instance Management:** Manages GPS device instances to avoid conflicts
+
+**MQTT Diagnostic Flow:**
+- **Traffic Monitoring:** Monitors all GPS-related MQTT traffic for debugging
+- **Device Discovery:** Scans and reports available GPS devices and instances
+- **Troubleshooting:** Provides diagnostic information for system issues
+
+**GPS Device Management Flow:**
+- **Device Cleanup:** Removes conflicting or duplicate GPS device registrations
+- **System Maintenance:** Provides utilities for GPS device management
+- **Conflict Resolution:** Resolves GPS instance conflicts automatically
+
+**Advanced Features:**
+- **Movement Detection:** Calculates distance using Haversine formula to detect position changes
+- **Obstruction Map Reset:** Automatically resets Starlink obstruction map when moved >500m
+- **Data-Driven Configuration:** Uses intelligent thresholds based on real GPS performance data
 
 ![image](https://github.com/user-attachments/assets/b883022b-914e-468d-8f7f-7b9fa44cc08c)
 
@@ -64,39 +83,82 @@ uci commit gps
 - Must be in Bypass Mode.
 - Ensure the RUTX50 has a static route to `192.168.100.1` for API access.
 
+## Solution Architecture
+
+This solution consists of four integrated Node-RED flows located in `src/flows/`:
+
+1. **`enhanced-victron-gps-control.json`** - Core GPS integration flow with dual-source management
+2. **`gps-registration-verification-module.json`** - Automatic GPS device registration system  
+3. **`mqtt-gps-diagnostics.json`** - MQTT diagnostic and monitoring tools
+4. **`fixed-gps-scanner-remover.json`** - GPS device management utilities
+
+The flows work together to provide a complete, robust GPS integration solution with automatic failover, device discovery, and comprehensive diagnostics.
+
 ## Installation and Configuration
 
-### 1. Copy the Flow
-
-Open `victron-gps-flow.json` and copy all content to your clipboard.
-
-### 2. Import into Node-RED
+### 1. Import Node-RED Flows
 
 1. Navigate to Node-RED: `http://<cerbo-ip-address>:1880`
 2. Click ☰ → Import
-3. Paste the JSON code and click **Import**
+3. Import each of the four flow files:
+   - `enhanced-victron-gps-control.json` - Main GPS integration
+   - `gps-registration-verification-module.json` - GPS device registration  
+   - `mqtt-gps-diagnostics.json` - MQTT diagnostics
+   - `fixed-gps-scanner-remover.json` - GPS device management
 
-### 3. Configure Credentials
+### 2. Configure Secure Credentials
 
-1. Open the `Trigger Branches` function node.
-2. Replace:
+**Method 1: Node-RED Context Store (Recommended)**
+
+1. Create a temporary function node in Node-RED
+2. Paste this code:
 
 ```js
-return [{payload:"go"},{payload:{username:"YOUR_RUTOS_USERNAME",password:"YOUR_RUTOS_PASSWORD"}}];
+flow.set('rutos_credentials', {
+    username: 'admin',  // Your RUTOS router username
+    password: 'your_secure_password'  // Your RUTOS router password
+});
+node.log('Credentials stored securely');
+return {payload: 'Credentials configured'};
 ```
 
-with your actual RUTOS login credentials.
+3. Deploy and inject once to store credentials
+4. **Delete the temporary function node** - credentials remain stored securely
+5. The flows will automatically use these stored credentials
 
-### 4. Verify IP Addresses
+**Method 2: Environment Variables**
 
-- Ensure `RUTOS login` and `Get RUTOS GPS` nodes point to the correct router IP (default: `192.168.80.1`).
-- Check `Get Starlink GPS` uses `192.168.100.1:9200`.
+On Venus OS command line:
+```bash
+export RUTOS_USERNAME="admin"
+export RUTOS_PASSWORD="your_password"
+systemctl restart nodered
+```
 
-### 5. Deploy the Flow
+### 3. Verify Network Configuration
 
-Click **Deploy** in Node-RED. The flow will run immediately and then every 30 minutes.
+- **RUTOS Router**: Ensure HTTP request nodes point to your router IP (default: `192.168.80.1`)
+- **Starlink**: Verify Starlink gRPC endpoint uses `192.168.100.1:9200`  
+- **MQTT Broker**: Confirm MQTT nodes target your Venus OS IP address
+- **Network Connectivity**: Test connectivity between Venus OS and both GPS sources
 
-Use the Debug sidebar to confirm GPS fetching, source selection, and MQTT updates.
+### 4. Deploy and Verify
+
+1. Click **Deploy** in Node-RED
+2. Monitor the Debug sidebar for:
+   - `✅ Using credentials from flow context store`
+   - GPS data from both RUTOS and Starlink sources
+   - GPS device registration messages
+   - MQTT publication confirmations
+
+3. Check Venus OS device list for newly registered GPS device
+4. Verify position updates appear in VRM Portal
+
+The system will automatically:
+- Poll GPS sources every 30 seconds
+- Select the most accurate GPS source
+- Register GPS device with Venus OS
+- Handle Venus OS reboots and reconfigurations
 
 ---
 

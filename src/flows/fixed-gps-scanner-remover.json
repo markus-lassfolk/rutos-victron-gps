@@ -1,291 +1,291 @@
 [
-  {
-    "id": "cf4f4e71f3205cfd",
-    "type": "tab",
-    "label": "Fixed GPS Scanner & Remover",
-    "disabled": false,
-    "info": "Fixed GPS Scanner & Device Remover - Clean Version"
-  },
-  {
-    "id": "0e39a2d468255e36",
-    "type": "inject",
-    "z": "cf4f4e71f3205cfd",
-    "name": "Start Device Scan",
-    "props": [],
-    "repeat": "",
-    "crontab": "",
-    "once": false,
-    "onceDelay": 0.1,
-    "topic": "",
-    "x": 160,
-    "y": 80,
-    "wires": [
-      [
-        "89be45e1c2c217c7"
-      ]
-    ]
-  },
-  {
-    "id": "89be45e1c2c217c7",
-    "type": "function",
-    "z": "cf4f4e71f3205cfd",
-    "name": "Enhanced Scan Start",
-    "func": "const existingDevices = flow.get('found_gps_devices') || [];\nconst now = Date.now();\n\nconst recentDevices = existingDevices.filter(device => {\n    const deviceAge = now - new Date(device.found_at).getTime();\n    return deviceAge < 300000 && device.connected > 0;\n});\n\nflow.set('found_gps_devices', recentDevices);\nflow.set('scan_start_time', now);\nflow.set('scan_active', true);\n\nnode.status({\n    fill: \"blue\",\n    shape: \"dot\",\n    text: `Scanning... (${recentDevices.length} existing devices preserved)`\n});\n\nnode.warn('ENHANCED GPS DEVICE SCAN STARTING...');\nnode.warn(`   - Preserved ${recentDevices.length} existing connected devices`);\nnode.warn('   - Listening for device/+/Status messages');\nnode.warn('   - Will identify GPS devices automatically');\nnode.warn('   - Click \"Show Current Results\" to see findings');\n\nif (recentDevices.length > 0) {\n    node.warn('PRESERVED DEVICES:');\n    recentDevices.forEach((device, index) => {\n        node.warn(`   ${index + 1}. ${device.device_id} - Connected: ${device.connected}`);\n    });\n}\n\nreturn {\n    payload: {\n        action: \"enhanced_scan_started\",\n        started_at: new Date().toISOString(),\n        preserved_devices: recentDevices.length,\n        devices: recentDevices\n    }\n};",
-    "outputs": 1,
-    "timeout": "",
-    "noerr": 0,
-    "initialize": "",
-    "finalize": "",
-    "libs": [],
-    "x": 420,
-    "y": 80,
-    "wires": [
-      [
-        "482d1db19e12f9d3"
-      ]
-    ]
-  },
-  {
-    "id": "482d1db19e12f9d3",
-    "type": "debug",
-    "z": "cf4f4e71f3205cfd",
-    "name": "Enhanced Scan Started",
-    "active": true,
-    "tosidebar": true,
-    "console": false,
-    "tostatus": false,
-    "complete": "payload",
-    "targetType": "msg",
-    "statusVal": "",
-    "statusType": "auto",
-    "x": 720,
-    "y": 80,
-    "wires": []
-  },
-  {
-    "id": "6343763779d18de9",
-    "type": "mqtt in",
-    "z": "cf4f4e71f3205cfd",
-    "name": "Listen for Devices",
-    "topic": "device/+/Status",
-    "qos": "2",
-    "datatype": "auto-detect",
-    "broker": "cerbo_gx_broker",
-    "nl": false,
-    "rap": true,
-    "rh": 0,
-    "inputs": 0,
-    "x": 170,
-    "y": 160,
-    "wires": [
-      [
-        "50334f8aea3355b1"
-      ]
-    ]
-  },
-  {
-    "id": "50334f8aea3355b1",
-    "type": "function",
-    "z": "cf4f4e71f3205cfd",
-    "name": "Enhanced Device Analyzer",
-    "func": "const topic = msg.topic || '';\nconst deviceMatch = topic.match(/device\\/([^/]+)\\/Status/);\n\nif (!deviceMatch) {\n    return null;\n}\n\nconst deviceId = deviceMatch[1];\nlet deviceData;\n\ntry {\n    deviceData = typeof msg.payload === 'string' ? JSON.parse(msg.payload) : msg.payload;\n} catch (e) {\n    node.warn(`Failed to parse device data for ${deviceId}: ${e.message}`);\n    deviceData = { raw: msg.payload, connected: 0 };\n}\n\nconst deviceIdLower = deviceId.toLowerCase();\nconst isGPSDevice = deviceIdLower.includes('gps') ||\n                   deviceIdLower.includes('starlink') ||\n                   deviceIdLower.includes('location') ||\n                   (deviceData.services && Object.keys(deviceData.services).some(s => \n                       s.toLowerCase().includes('gps') || s.toLowerCase().includes('location')\n                   ));\n\nif (isGPSDevice) {\n    const foundDevices = flow.get('found_gps_devices') || [];\n    const existingIndex = foundDevices.findIndex(d => d.device_id === deviceId);\n    \n    const deviceInfo = {\n        device_id: deviceId,\n        connected: deviceData.connected || 0,\n        services: deviceData.services || {},\n        found_at: new Date().toISOString(),\n        topic: topic,\n        last_seen: new Date().toISOString(),\n        version: deviceData.version || 'unknown',\n        client_id: deviceData.clientId || deviceId\n    };\n    \n    if (existingIndex >= 0) {\n        foundDevices[existingIndex] = {\n            ...foundDevices[existingIndex],\n            ...deviceInfo,\n            found_at: foundDevices[existingIndex].found_at\n        };\n        node.warn(`Updated GPS device: ${deviceId} - Connected: ${deviceData.connected}`);\n    } else {\n        foundDevices.push(deviceInfo);\n        node.warn(`NEW GPS device found: ${deviceId} - Connected: ${deviceData.connected}`);\n    }\n    \n    flow.set('found_gps_devices', foundDevices);\n    \n    node.status({\n        fill: \"green\",\n        shape: \"dot\",\n        text: `Found ${foundDevices.length} GPS device(s) - Latest: ${deviceId}`\n    });\n    \n    return {\n        payload: {\n            action: 'gps_device_found',\n            device_info: deviceInfo,\n            total_found: foundDevices.length,\n            is_new: existingIndex < 0\n        }\n    };\n}\n\nreturn null;",
-    "outputs": 1,
-    "timeout": "",
-    "noerr": 0,
-    "initialize": "",
-    "finalize": "",
-    "libs": [],
-    "x": 450,
-    "y": 160,
-    "wires": [
-      [
-        "c9517d749b26c9fd"
-      ]
-    ]
-  },
-  {
-    "id": "c9517d749b26c9fd",
-    "type": "debug",
-    "z": "cf4f4e71f3205cfd",
-    "name": "GPS Devices Found",
-    "active": true,
-    "tosidebar": true,
-    "console": false,
-    "tostatus": false,
-    "complete": "payload",
-    "targetType": "msg",
-    "statusVal": "",
-    "statusType": "auto",
-    "x": 750,
-    "y": 160,
-    "wires": []
-  },
-  {
-    "id": "8cc9405b5aa6e5a3",
-    "type": "inject",
-    "z": "cf4f4e71f3205cfd",
-    "name": "Show Current Results",
-    "props": [],
-    "repeat": "",
-    "crontab": "",
-    "once": false,
-    "onceDelay": 0.1,
-    "topic": "",
-    "x": 180,
-    "y": 240,
-    "wires": [
-      [
-        "8f235626e7204d53"
-      ]
-    ]
-  },
-  {
-    "id": "8f235626e7204d53",
-    "type": "function",
-    "z": "cf4f4e71f3205cfd",
-    "name": "Enhanced Results Summary",
-    "func": "const foundDevices = flow.get('found_gps_devices') || [];\nconst scanStartTime = flow.get('scan_start_time');\nconst now = Date.now();\n\nconst connectedDevices = foundDevices.filter(d => d.connected > 0);\nconst disconnectedDevices = foundDevices.filter(d => d.connected === 0);\n\nconst summary = {\n    scan_completed_at: new Date().toISOString(),\n    scan_duration_ms: scanStartTime ? now - scanStartTime : 0,\n    total_devices_found: foundDevices.length,\n    connected_devices: connectedDevices.length,\n    disconnected_devices: disconnectedDevices.length,\n    all_devices: foundDevices,\n    connected_only: connectedDevices,\n    disconnected_only: disconnectedDevices\n};\n\nif (foundDevices.length > 0) {\n    node.status({\n        fill: \"green\",\n        shape: \"dot\",\n        text: `${connectedDevices.length} connected, ${disconnectedDevices.length} disconnected GPS devices`\n    });\n    \n    node.warn(`ENHANCED SCAN RESULTS: Found ${foundDevices.length} GPS devices total`);\n    \n    if (connectedDevices.length > 0) {\n        node.warn(`CONNECTED GPS DEVICES (${connectedDevices.length}):`);\n        connectedDevices.forEach((device, index) => {\n            const services = Object.keys(device.services || {}).join(', ') || 'none';\n            node.warn(`   ${index + 1}. ${device.device_id}`);\n            node.warn(`      Connected: ${device.connected}, Services: ${services}`);\n            node.warn(`      Last seen: ${device.last_seen}`);\n        });\n    }\n    \n    if (disconnectedDevices.length > 0) {\n        node.warn(`DISCONNECTED GPS DEVICES (${disconnectedDevices.length}):`);\n        disconnectedDevices.forEach((device, index) => {\n            node.warn(`   ${index + 1}. ${device.device_id} (Last seen: ${device.last_seen})`);\n        });\n    }\n    \n    node.warn('To remove a device, use \"Remove Custom GPS\" with the device ID');\n    \n} else {\n    node.status({\n        fill: \"yellow\",\n        shape: \"dot\",\n        text: \"No GPS devices found\"\n    });\n    \n    node.warn('ENHANCED SCAN RESULTS: No GPS devices found');\n    node.warn('   Possible reasons:');\n    node.warn('   1. No GPS devices are currently registered');\n    node.warn('   2. Devices are using unexpected naming patterns');\n    node.warn('   3. MQTT connection issues');\n    node.warn('   4. Devices may have disconnected');\n}\n\nreturn { payload: summary };",
-    "outputs": 1,
-    "timeout": "",
-    "noerr": 0,
-    "initialize": "",
-    "finalize": "",
-    "libs": [],
-    "x": 480,
-    "y": 240,
-    "wires": [
-      [
-        "bfa7854e99dc3b0b"
-      ]
-    ]
-  },
-  {
-    "id": "bfa7854e99dc3b0b",
-    "type": "debug",
-    "z": "cf4f4e71f3205cfd",
-    "name": "Enhanced Results",
-    "active": true,
-    "tosidebar": true,
-    "console": false,
-    "tostatus": false,
-    "complete": "payload",
-    "targetType": "msg",
-    "statusVal": "",
-    "statusType": "auto",
-    "x": 750,
-    "y": 240,
-    "wires": []
-  },
-  {
-    "id": "235d9bfa5785290e",
-    "type": "inject",
-    "z": "cf4f4e71f3205cfd",
-    "name": "Remove Custom GPS",
-    "props": [
-      {
-        "p": "payload",
-        "v": "starlink_gps_e9b5",
-        "vt": "str"
-      }
-    ],
-    "repeat": "",
-    "crontab": "",
-    "once": false,
-    "onceDelay": 0.1,
-    "topic": "",
-    "x": 180,
-    "y": 320,
-    "wires": [
-      [
-        "358be5e2cbeea43e"
-      ]
-    ]
-  },
-  {
-    "id": "358be5e2cbeea43e",
-    "type": "function",
-    "z": "cf4f4e71f3205cfd",
-    "name": "GPS Device Remover",
-    "func": "const deviceToRemove = msg.payload || 'starlink_gps_e9b5';\n\nif (!deviceToRemove || deviceToRemove.trim() === '') {\n    node.warn('ERROR: No device ID specified for removal');\n    return null;\n}\n\nnode.warn(`ATTEMPTING TO REMOVE GPS DEVICE: ${deviceToRemove}`);\n\nconst unregisterPayload = {\n    clientId: deviceToRemove,\n    connected: 0\n};\n\nnode.status({\n    fill: \"red\",\n    shape: \"dot\",\n    text: `Removing: ${deviceToRemove}`\n});\n\nnode.warn(`Sending unregister command for ${deviceToRemove}`);\n\nreturn {\n    topic: `device/${deviceToRemove}/Status`,\n    payload: unregisterPayload\n};",
-    "outputs": 1,
-    "timeout": "",
-    "noerr": 0,
-    "initialize": "",
-    "finalize": "",
-    "libs": [],
-    "x": 430,
-    "y": 320,
-    "wires": [
-      [
-        "6213b273f906fe78",
-        "fad2990af133aa10"
-      ]
-    ]
-  },
-  {
-    "id": "6213b273f906fe78",
-    "type": "mqtt out",
-    "z": "cf4f4e71f3205cfd",
-    "name": "Send Remove Command",
-    "topic": "",
-    "qos": "2",
-    "retain": "false",
-    "respTopic": "",
-    "contentType": "",
-    "userProps": "",
-    "correl": "",
-    "expiry": "",
-    "broker": "cerbo_gx_broker",
-    "x": 720,
-    "y": 300,
-    "wires": []
-  },
-  {
-    "id": "fad2990af133aa10",
-    "type": "debug",
-    "z": "cf4f4e71f3205cfd",
-    "name": "Remove Command",
-    "active": true,
-    "tosidebar": true,
-    "console": false,
-    "tostatus": false,
-    "complete": "true",
-    "targetType": "full",
-    "statusVal": "",
-    "statusType": "auto",
-    "x": 720,
-    "y": 340,
-    "wires": []
-  },
-  {
-    "id": "cerbo_gx_broker",
-    "type": "mqtt-broker",
-    "name": "Cerbo GX",
-    "broker": "192.168.80.242",
-    "port": "1883",
-    "clientid": "",
-    "autoConnect": true,
-    "usetls": false,
-    "protocolVersion": "4",
-    "keepalive": "60",
-    "cleansession": true,
-    "autoUnsubscribe": true,
-    "birthTopic": "",
-    "birthQos": "0",
-    "birthRetain": "false",
-    "birthPayload": "",
-    "birthMsg": {},
-    "closeTopic": "",
-    "closeQos": "0",
-    "closeRetain": "false",
-    "closePayload": "",
-    "closeMsg": {},
-    "willTopic": "",
-    "willQos": "0",
-    "willRetain": "false",
-    "willPayload": "",
-    "willMsg": {},
-    "userProps": "",
-    "sessionExpiry": ""
-  }
+    {
+        "id": "cf4f4e71f3205cfd",
+        "type": "tab",
+        "label": "Fixed GPS Scanner & Remover",
+        "disabled": false,
+        "info": "Fixed GPS Scanner & Device Remover - Clean Version"
+    },
+    {
+        "id": "0e39a2d468255e36",
+        "type": "inject",
+        "z": "cf4f4e71f3205cfd",
+        "name": "Start Device Scan",
+        "props": [],
+        "repeat": "",
+        "crontab": "",
+        "once": false,
+        "onceDelay": 0.1,
+        "topic": "",
+        "x": 160,
+        "y": 80,
+        "wires": [
+            [
+                "89be45e1c2c217c7"
+            ]
+        ]
+    },
+    {
+        "id": "89be45e1c2c217c7",
+        "type": "function",
+        "z": "cf4f4e71f3205cfd",
+        "name": "Enhanced Scan Start",
+        "func": "const existingDevices = flow.get('found_gps_devices') || [];\nconst now = Date.now();\n\nconst recentDevices = existingDevices.filter(device => {\n    const deviceAge = now - new Date(device.found_at).getTime();\n    return deviceAge < 300000 && device.connected > 0;\n});\n\nflow.set('found_gps_devices', recentDevices);\nflow.set('scan_start_time', now);\nflow.set('scan_active', true);\n\nnode.status({\n    fill: \"blue\",\n    shape: \"dot\",\n    text: `Scanning... (${recentDevices.length} existing devices preserved)`\n});\n\nnode.warn('ENHANCED GPS DEVICE SCAN STARTING...');\nnode.warn(`   - Preserved ${recentDevices.length} existing connected devices`);\nnode.warn('   - Listening for device/+/Status messages');\nnode.warn('   - Will identify GPS devices automatically');\nnode.warn('   - Click \"Show Current Results\" to see findings');\n\nif (recentDevices.length > 0) {\n    node.warn('PRESERVED DEVICES:');\n    recentDevices.forEach((device, index) => {\n        node.warn(`   ${index + 1}. ${device.device_id} - Connected: ${device.connected}`);\n    });\n}\n\nreturn {\n    payload: {\n        action: \"enhanced_scan_started\",\n        started_at: new Date().toISOString(),\n        preserved_devices: recentDevices.length,\n        devices: recentDevices\n    }\n};",
+        "outputs": 1,
+        "timeout": "",
+        "noerr": 0,
+        "initialize": "",
+        "finalize": "",
+        "libs": [],
+        "x": 420,
+        "y": 80,
+        "wires": [
+            [
+                "482d1db19e12f9d3"
+            ]
+        ]
+    },
+    {
+        "id": "482d1db19e12f9d3",
+        "type": "debug",
+        "z": "cf4f4e71f3205cfd",
+        "name": "Enhanced Scan Started",
+        "active": true,
+        "tosidebar": true,
+        "console": false,
+        "tostatus": false,
+        "complete": "payload",
+        "targetType": "msg",
+        "statusVal": "",
+        "statusType": "auto",
+        "x": 720,
+        "y": 80,
+        "wires": []
+    },
+    {
+        "id": "6343763779d18de9",
+        "type": "mqtt in",
+        "z": "cf4f4e71f3205cfd",
+        "name": "Listen for Devices",
+        "topic": "device/+/Status",
+        "qos": "2",
+        "datatype": "auto-detect",
+        "broker": "cerbo_gx_broker",
+        "nl": false,
+        "rap": true,
+        "rh": 0,
+        "inputs": 0,
+        "x": 170,
+        "y": 160,
+        "wires": [
+            [
+                "50334f8aea3355b1"
+            ]
+        ]
+    },
+    {
+        "id": "50334f8aea3355b1",
+        "type": "function",
+        "z": "cf4f4e71f3205cfd",
+        "name": "Enhanced Device Analyzer",
+        "func": "const topic = msg.topic || '';\nconst deviceMatch = topic.match(/device\\/([^/]+)\\/Status/);\n\nif (!deviceMatch) {\n    return null;\n}\n\nconst deviceId = deviceMatch[1];\nlet deviceData;\n\ntry {\n    deviceData = typeof msg.payload === 'string' ? JSON.parse(msg.payload) : msg.payload;\n} catch (e) {\n    node.warn(`Failed to parse device data for ${deviceId}: ${e.message}`);\n    deviceData = { raw: msg.payload, connected: 0 };\n}\n\nconst deviceIdLower = deviceId.toLowerCase();\nconst isGPSDevice = deviceIdLower.includes('gps') ||\n                   deviceIdLower.includes('starlink') ||\n                   deviceIdLower.includes('location') ||\n                   (deviceData.services && Object.keys(deviceData.services).some(s => \n                       s.toLowerCase().includes('gps') || s.toLowerCase().includes('location')\n                   ));\n\nif (isGPSDevice) {\n    const foundDevices = flow.get('found_gps_devices') || [];\n    const existingIndex = foundDevices.findIndex(d => d.device_id === deviceId);\n    \n    const deviceInfo = {\n        device_id: deviceId,\n        connected: deviceData.connected || 0,\n        services: deviceData.services || {},\n        found_at: new Date().toISOString(),\n        topic: topic,\n        last_seen: new Date().toISOString(),\n        version: deviceData.version || 'unknown',\n        client_id: deviceData.clientId || deviceId\n    };\n    \n    if (existingIndex >= 0) {\n        foundDevices[existingIndex] = {\n            ...foundDevices[existingIndex],\n            ...deviceInfo,\n            found_at: foundDevices[existingIndex].found_at\n        };\n        node.warn(`Updated GPS device: ${deviceId} - Connected: ${deviceData.connected}`);\n    } else {\n        foundDevices.push(deviceInfo);\n        node.warn(`NEW GPS device found: ${deviceId} - Connected: ${deviceData.connected}`);\n    }\n    \n    flow.set('found_gps_devices', foundDevices);\n    \n    node.status({\n        fill: \"green\",\n        shape: \"dot\",\n        text: `Found ${foundDevices.length} GPS device(s) - Latest: ${deviceId}`\n    });\n    \n    return {\n        payload: {\n            action: 'gps_device_found',\n            device_info: deviceInfo,\n            total_found: foundDevices.length,\n            is_new: existingIndex < 0\n        }\n    };\n}\n\nreturn null;",
+        "outputs": 1,
+        "timeout": "",
+        "noerr": 0,
+        "initialize": "",
+        "finalize": "",
+        "libs": [],
+        "x": 450,
+        "y": 160,
+        "wires": [
+            [
+                "c9517d749b26c9fd"
+            ]
+        ]
+    },
+    {
+        "id": "c9517d749b26c9fd",
+        "type": "debug",
+        "z": "cf4f4e71f3205cfd",
+        "name": "GPS Devices Found",
+        "active": true,
+        "tosidebar": true,
+        "console": false,
+        "tostatus": false,
+        "complete": "payload",
+        "targetType": "msg",
+        "statusVal": "",
+        "statusType": "auto",
+        "x": 750,
+        "y": 160,
+        "wires": []
+    },
+    {
+        "id": "8cc9405b5aa6e5a3",
+        "type": "inject",
+        "z": "cf4f4e71f3205cfd",
+        "name": "Show Current Results",
+        "props": [],
+        "repeat": "",
+        "crontab": "",
+        "once": false,
+        "onceDelay": 0.1,
+        "topic": "",
+        "x": 180,
+        "y": 240,
+        "wires": [
+            [
+                "8f235626e7204d53"
+            ]
+        ]
+    },
+    {
+        "id": "8f235626e7204d53",
+        "type": "function",
+        "z": "cf4f4e71f3205cfd",
+        "name": "Enhanced Results Summary",
+        "func": "const foundDevices = flow.get('found_gps_devices') || [];\nconst scanStartTime = flow.get('scan_start_time');\nconst now = Date.now();\n\nconst connectedDevices = foundDevices.filter(d => d.connected > 0);\nconst disconnectedDevices = foundDevices.filter(d => d.connected === 0);\n\nconst summary = {\n    scan_completed_at: new Date().toISOString(),\n    scan_duration_ms: scanStartTime ? now - scanStartTime : 0,\n    total_devices_found: foundDevices.length,\n    connected_devices: connectedDevices.length,\n    disconnected_devices: disconnectedDevices.length,\n    all_devices: foundDevices,\n    connected_only: connectedDevices,\n    disconnected_only: disconnectedDevices\n};\n\nif (foundDevices.length > 0) {\n    node.status({\n        fill: \"green\",\n        shape: \"dot\",\n        text: `${connectedDevices.length} connected, ${disconnectedDevices.length} disconnected GPS devices`\n    });\n    \n    node.warn(`ENHANCED SCAN RESULTS: Found ${foundDevices.length} GPS devices total`);\n    \n    if (connectedDevices.length > 0) {\n        node.warn(`CONNECTED GPS DEVICES (${connectedDevices.length}):`);\n        connectedDevices.forEach((device, index) => {\n            const services = Object.keys(device.services || {}).join(', ') || 'none';\n            node.warn(`   ${index + 1}. ${device.device_id}`);\n            node.warn(`      Connected: ${device.connected}, Services: ${services}`);\n            node.warn(`      Last seen: ${device.last_seen}`);\n        });\n    }\n    \n    if (disconnectedDevices.length > 0) {\n        node.warn(`DISCONNECTED GPS DEVICES (${disconnectedDevices.length}):`);\n        disconnectedDevices.forEach((device, index) => {\n            node.warn(`   ${index + 1}. ${device.device_id} (Last seen: ${device.last_seen})`);\n        });\n    }\n    \n    node.warn('To remove a device, use \"Remove Custom GPS\" with the device ID');\n    \n} else {\n    node.status({\n        fill: \"yellow\",\n        shape: \"dot\",\n        text: \"No GPS devices found\"\n    });\n    \n    node.warn('ENHANCED SCAN RESULTS: No GPS devices found');\n    node.warn('   Possible reasons:');\n    node.warn('   1. No GPS devices are currently registered');\n    node.warn('   2. Devices are using unexpected naming patterns');\n    node.warn('   3. MQTT connection issues');\n    node.warn('   4. Devices may have disconnected');\n}\n\nreturn { payload: summary };",
+        "outputs": 1,
+        "timeout": "",
+        "noerr": 0,
+        "initialize": "",
+        "finalize": "",
+        "libs": [],
+        "x": 480,
+        "y": 240,
+        "wires": [
+            [
+                "bfa7854e99dc3b0b"
+            ]
+        ]
+    },
+    {
+        "id": "bfa7854e99dc3b0b",
+        "type": "debug",
+        "z": "cf4f4e71f3205cfd",
+        "name": "Enhanced Results",
+        "active": true,
+        "tosidebar": true,
+        "console": false,
+        "tostatus": false,
+        "complete": "payload",
+        "targetType": "msg",
+        "statusVal": "",
+        "statusType": "auto",
+        "x": 750,
+        "y": 240,
+        "wires": []
+    },
+    {
+        "id": "235d9bfa5785290e",
+        "type": "inject",
+        "z": "cf4f4e71f3205cfd",
+        "name": "Remove Custom GPS",
+        "props": [
+            {
+                "p": "payload",
+                "v": "starlink_gps_e9b5",
+                "vt": "str"
+            }
+        ],
+        "repeat": "",
+        "crontab": "",
+        "once": false,
+        "onceDelay": 0.1,
+        "topic": "",
+        "x": 180,
+        "y": 320,
+        "wires": [
+            [
+                "358be5e2cbeea43e"
+            ]
+        ]
+    },
+    {
+        "id": "358be5e2cbeea43e",
+        "type": "function",
+        "z": "cf4f4e71f3205cfd",
+        "name": "GPS Device Remover",
+        "func": "const deviceToRemove = msg.payload || 'starlink_gps_e9b5';\n\nif (!deviceToRemove || deviceToRemove.trim() === '') {\n    node.warn('ERROR: No device ID specified for removal');\n    return null;\n}\n\nnode.warn(`ATTEMPTING TO REMOVE GPS DEVICE: ${deviceToRemove}`);\n\nconst unregisterPayload = {\n    clientId: deviceToRemove,\n    connected: 0\n};\n\nnode.status({\n    fill: \"red\",\n    shape: \"dot\",\n    text: `Removing: ${deviceToRemove}`\n});\n\nnode.warn(`Sending unregister command for ${deviceToRemove}`);\n\nreturn {\n    topic: `device/${deviceToRemove}/Status`,\n    payload: unregisterPayload\n};",
+        "outputs": 1,
+        "timeout": "",
+        "noerr": 0,
+        "initialize": "",
+        "finalize": "",
+        "libs": [],
+        "x": 430,
+        "y": 320,
+        "wires": [
+            [
+                "6213b273f906fe78",
+                "fad2990af133aa10"
+            ]
+        ]
+    },
+    {
+        "id": "6213b273f906fe78",
+        "type": "mqtt out",
+        "z": "cf4f4e71f3205cfd",
+        "name": "Send Remove Command",
+        "topic": "",
+        "qos": "2",
+        "retain": "false",
+        "respTopic": "",
+        "contentType": "",
+        "userProps": "",
+        "correl": "",
+        "expiry": "",
+        "broker": "cerbo_gx_broker",
+        "x": 720,
+        "y": 300,
+        "wires": []
+    },
+    {
+        "id": "fad2990af133aa10",
+        "type": "debug",
+        "z": "cf4f4e71f3205cfd",
+        "name": "Remove Command",
+        "active": true,
+        "tosidebar": true,
+        "console": false,
+        "tostatus": false,
+        "complete": "true",
+        "targetType": "full",
+        "statusVal": "",
+        "statusType": "auto",
+        "x": 720,
+        "y": 340,
+        "wires": []
+    },
+    {
+        "id": "cerbo_gx_broker",
+        "type": "mqtt-broker",
+        "name": "Cerbo GX",
+        "broker": "192.168.80.242",
+        "port": "1883",
+        "clientid": "",
+        "autoConnect": true,
+        "usetls": false,
+        "protocolVersion": "4",
+        "keepalive": "60",
+        "cleansession": true,
+        "autoUnsubscribe": true,
+        "birthTopic": "",
+        "birthQos": "0",
+        "birthRetain": "false",
+        "birthPayload": "",
+        "birthMsg": {},
+        "closeTopic": "",
+        "closeQos": "0",
+        "closeRetain": "false",
+        "closePayload": "",
+        "closeMsg": {},
+        "willTopic": "",
+        "willQos": "0",
+        "willRetain": "false",
+        "willPayload": "",
+        "willMsg": {},
+        "userProps": "",
+        "sessionExpiry": ""
+    }
 ]

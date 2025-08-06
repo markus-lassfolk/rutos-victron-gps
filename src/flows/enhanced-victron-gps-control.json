@@ -1,955 +1,1071 @@
 [
-  {
-    "id": "052a8592cc8aee65",
-    "type": "tab",
-    "label": "Enhanced Victron GPS Control",
-    "disabled": false,
-    "info": "Enhanced GPS flow with:\n- Data-driven thresholds (RUTOS: 1m, Starlink: 7m, Position: 6m, Altitude: 18m)\n- Always-use-most-accurate GPS source selection\n- Smart movement detection with Haversine distance calculations\n- Enhanced error handling with fallback logic\n- Manual override system\n- File logging with accuracy tracking\n- GPS stability monitoring (6m threshold)"
-  },
-  {
-    "id": "86830d0a0f296f20",
-    "type": "inject",
-    "z": "052a8592cc8aee65",
-    "name": "Initialize Config",
-    "props": [
-      {
-        "p": "payload"
-      }
-    ],
-    "repeat": "",
-    "crontab": "",
-    "once": true,
-    "onceDelay": 0.1,
-    "topic": "",
-    "payload": "init",
-    "payloadType": "str",
-    "x": 130,
-    "y": 580,
-    "wires": [
-      [
-        "627f8ecb9fecbb11"
-      ]
-    ]
-  },
-  {
-    "id": "627f8ecb9fecbb11",
-    "type": "function",
-    "z": "052a8592cc8aee65",
-    "name": "Configuration Manager",
-    "func": "// Configuration Manager - Centralized parameter management\n\nif (msg.topic === 'config/set' && msg.payload.param && msg.payload.value !== undefined) {\n    // Set configuration parameter\n    flow.set(msg.payload.param, msg.payload.value);\n    node.status({fill: 'green', shape: 'dot', text: `Set ${msg.payload.param}: ${msg.payload.value}`});\n    return {topic: 'config/updated', payload: {param: msg.payload.param, value: msg.payload.value}};\n}\n\nif (msg.topic === 'config/get') {\n    // Get all configuration parameters\n    const config = {\n        rutos_accuracy: flow.get('config_rutos_accuracy') || 1,        // Data-driven: 1m (2x degradation from 0.5m typical)\n        starlink_accuracy: flow.get('config_starlink_accuracy') || 7,  // Data-driven: 7m (avg 5.5m + buffer)\n        position_eps: flow.get('config_position_eps') || 6,            // Data-driven: 6m (max observed 5.2m + buffer)\n        altitude_threshold: flow.get('config_altitude_threshold') || 18, // Data-driven: 18m (p95 15.4m + buffer)\n        speed_threshold: flow.get('config_speed_threshold') || 0.1,\n        camping_threshold: flow.get('config_camping_threshold') || 50,\n        obstruction_threshold: flow.get('config_obstruction_threshold') || 200,\n        gps_stability_threshold: flow.get('config_gps_stability_threshold') || 6, // Data-driven: 6m (max jitter 4.7m + buffer)\n        stationary_time: flow.get('config_stationary_time') || 300000,\n        source_override: flow.get('config_source_override') || 'auto',\n        log_level: flow.get('config_log_level') || 'info'\n    };\n    return {topic: 'config/current', payload: config};\n}\n\n// Initialize default configuration on startup\nif (msg.payload === 'init') {\n    const defaults = {\n        config_rutos_accuracy: 1,        // Data-driven: 1m (2x degradation from 0.5m typical)\n        config_starlink_accuracy: 7,     // Data-driven: 7m (avg 5.5m + buffer)\n        config_position_eps: 6,          // Data-driven: 6m (max observed 5.2m + buffer)\n        config_altitude_threshold: 18,   // Data-driven: 18m (p95 15.4m + buffer)\n        config_speed_threshold: 0.1,\n        config_camping_threshold: 50,\n        config_obstruction_threshold: 200,\n        config_gps_stability_threshold: 6, // Data-driven: 6m (max jitter 4.7m + buffer)\n        config_stationary_time: 300000,\n        config_source_override: 'auto',\n        config_log_level: 'info'\n    };\n    \n    Object.keys(defaults).forEach(key => {\n        if (flow.get(key) === undefined) {\n            flow.set(key, defaults[key]);\n        }\n    });\n    \n    node.status({fill: 'blue', shape: 'dot', text: 'Config initialized'});\n    return {topic: 'config/initialized', payload: defaults};\n}\n\nreturn null;",
-    "outputs": 1,
-    "noerr": 0,
-    "initialize": "",
-    "finalize": "",
-    "libs": [],
-    "x": 340,
-    "y": 580,
-    "wires": [
-      [
-        "e083d8d49c69bec7"
-      ]
-    ]
-  },
-  {
-    "id": "e083d8d49c69bec7",
-    "type": "debug",
-    "z": "052a8592cc8aee65",
-    "name": "Config Debug",
-    "active": true,
-    "tosidebar": true,
-    "console": false,
-    "tostatus": false,
-    "complete": "payload",
-    "targetType": "msg",
-    "x": 580,
-    "y": 580,
-    "wires": []
-  },
-  {
-    "id": "556c1786c42170d2",
-    "type": "mqtt in",
-    "z": "052a8592cc8aee65",
-    "name": "Manual Override",
-    "topic": "gps/control/+",
-    "qos": "2",
-    "datatype": "auto-detect",
-    "broker": "2712849475d6de23",
-    "nl": false,
-    "rap": true,
-    "rh": 0,
-    "inputs": 0,
-    "x": 130,
-    "y": 640,
-    "wires": [
-      [
-        "c4ea4dad0edad6ed"
-      ]
-    ]
-  },
-  {
-    "id": "c4ea4dad0edad6ed",
-    "type": "function",
-    "z": "052a8592cc8aee65",
-    "name": "Override Handler",
-    "func": "// Manual Override Handler\n// MQTT Topics:\n// gps/control/source - Set source override: 'auto', 'rutos', 'starlink'\n// gps/control/force_update - Force GPS update regardless of change detection\n// gps/control/reset_obstruction - Force obstruction map reset\n// gps/control/config - Set configuration parameters\n\nconst parts = msg.topic.split('/');\nconst command = parts[2];\n\nswitch (command) {\n    case 'source':\n        if (['auto', 'rutos', 'starlink'].includes(msg.payload)) {\n            flow.set('config_source_override', msg.payload);\n            node.status({fill: 'yellow', shape: 'dot', text: `Source: ${msg.payload}`});\n            return {topic: 'gps/status', payload: {command: 'source_override', value: msg.payload}};\n        }\n        break;\n        \n    case 'force_update':\n        if (msg.payload === true || msg.payload === 'true') {\n            flow.set('force_next_update', true);\n            node.status({fill: 'orange', shape: 'dot', text: 'Force update set'});\n            return {topic: 'gps/status', payload: {command: 'force_update', value: true}};\n        }\n        break;\n        \n    case 'reset_obstruction':\n        if (msg.payload === true || msg.payload === 'true') {\n            return [null, {topic: 'gps/control/obstruction_reset', payload: {forced: true}}];\n        }\n        break;\n        \n    case 'config':\n        try {\n            const config = typeof msg.payload === 'string' ? JSON.parse(msg.payload) : msg.payload;\n            if (config.param && config.value !== undefined) {\n                flow.set(`config_${config.param}`, config.value);\n                node.status({fill: 'green', shape: 'dot', text: `Config: ${config.param}`});\n                return {topic: 'gps/status', payload: {command: 'config_set', param: config.param, value: config.value}};\n            }\n        } catch (e) {\n            node.error('Invalid config JSON: ' + e.message);\n        }\n        break;\n        \n    case 'get_logs':\n        const logs = flow.get('event_logs') || [];\n        return {topic: 'gps/logs', payload: logs};\n        \n    case 'get_status':\n        const status = {\n            last_position: flow.get('last_position'),\n            victron_stored: flow.get('victron_stored_position'),\n            source_override: flow.get('config_source_override'),\n            last_update: flow.get('last_victron_update')\n        };\n        return {topic: 'gps/status', payload: status};\n        \n    case 'get_accuracy_stats':\n        // Get accuracy statistics for both sources\n        const rutosStats = flow.get('rutos_accuracy_stats') || {readings: [], avg: 0, count: 0};\n        const starlinkStats = flow.get('starlink_accuracy_stats') || {readings: [], avg: 0, count: 0};\n        \n        const stats = {\n            rutos: {\n                count: rutosStats.count,\n                average: rutosStats.avg,\n                moving_avg: rutosStats.readings.slice(-10).reduce((a, b) => a + b, 0) / Math.min(10, rutosStats.readings.length) || 0,\n                min: Math.min(...rutosStats.readings) || 0,\n                max: Math.max(...rutosStats.readings) || 0,\n                recommended_threshold: Math.ceil((rutosStats.avg || 5) * 1.5)\n            },\n            starlink: {\n                count: starlinkStats.count,\n                average: starlinkStats.avg,\n                moving_avg: starlinkStats.readings.slice(-10).reduce((a, b) => a + b, 0) / Math.min(10, starlinkStats.readings.length) || 0,\n                min: Math.min(...starlinkStats.readings) || 0,\n                max: Math.max(...starlinkStats.readings) || 0,\n                recommended_threshold: Math.ceil((starlinkStats.avg || 10) * 1.5)\n            }\n        };\n        return {topic: 'gps/accuracy_stats', payload: stats};\n}\n\nreturn null;",
-    "outputs": 2,
-    "noerr": 0,
-    "initialize": "",
-    "finalize": "",
-    "libs": [],
-    "x": 690,
-    "y": 640,
-    "wires": [
-      [
-        "d969086d9708320e",
-        "8230b22fdf7aeb05"
-      ],
-      [
-        "bdb24cd84e9befd5"
-      ]
-    ]
-  },
-  {
-    "id": "d969086d9708320e",
-    "type": "debug",
-    "z": "052a8592cc8aee65",
-    "name": "Override Debug",
-    "active": true,
-    "tosidebar": true,
-    "console": false,
-    "tostatus": false,
-    "complete": "payload",
-    "targetType": "msg",
-    "x": 660,
-    "y": 720,
-    "wires": []
-  },
-  {
-    "id": "31e3929429ac8625",
-    "type": "mqtt in",
-    "z": "052a8592cc8aee65",
-    "name": "Read Victron GPS",
-    "topic": "R/+/gps/+/Position/+",
-    "qos": "2",
-    "datatype": "auto-detect",
-    "broker": "2712849475d6de23",
-    "nl": false,
-    "rap": true,
-    "rh": 0,
-    "inputs": 0,
-    "x": 150,
-    "y": 740,
-    "wires": [
-      [
-        "248189ee15d89297"
-      ]
-    ]
-  },
-  {
-    "id": "248189ee15d89297",
-    "type": "function",
-    "z": "052a8592cc8aee65",
-    "name": "Parse Victron GPS",
-    "func": "// Parse Victron GPS readings to maintain stored position cache\n\nconst parts = msg.topic.split('/');\nif (parts.length < 6) return null;\n\nconst portal = parts[1];\nconst device = parts[3];\nconst field = parts[5]; // Latitude or Longitude\n\nlet stored = flow.get('victron_stored_position') || {};\n\ntry {\n    const data = typeof msg.payload === 'string' ? JSON.parse(msg.payload) : msg.payload;\n    const value = data.value;\n    \n    if (field === 'Latitude') {\n        stored.lat = +value;\n    } else if (field === 'Longitude') {\n        stored.lon = +value;\n    }\n    \n    stored.portal = portal;\n    stored.device = device;\n    stored.updated = Date.now();\n    \n    flow.set('victron_stored_position', stored);\n    \n    return {\n        topic: 'victron/position/updated',\n        payload: {\n            field: field,\n            value: value,\n            stored: stored\n        }\n    };\n} catch (e) {\n    node.error('Error parsing Victron GPS: ' + e.message);\n    return null;\n}",
-    "outputs": 1,
-    "noerr": 0,
-    "initialize": "",
-    "finalize": "",
-    "libs": [],
-    "x": 290,
-    "y": 880,
-    "wires": [
-      [
-        "1791ba49815191e7"
-      ]
-    ]
-  },
-  {
-    "id": "1791ba49815191e7",
-    "type": "debug",
-    "z": "052a8592cc8aee65",
-    "name": "Victron GPS Debug",
-    "active": true,
-    "tosidebar": true,
-    "console": false,
-    "tostatus": false,
-    "complete": "payload",
-    "targetType": "msg",
-    "x": 510,
-    "y": 820,
-    "wires": []
-  },
-  {
-    "id": "8230b22fdf7aeb05",
-    "type": "mqtt out",
-    "z": "052a8592cc8aee65",
-    "name": "Status/Logs Output",
-    "topic": "",
-    "qos": "",
-    "retain": "",
-    "respTopic": "",
-    "contentType": "",
-    "userProps": "",
-    "correl": "",
-    "expiry": "",
-    "broker": "2712849475d6de23",
-    "x": 850,
-    "y": 560,
-    "wires": []
-  },
-  {
-    "id": "3a90bc39e6b61d2a",
-    "type": "file",
-    "z": "052a8592cc8aee65",
-    "name": "GPS Event Log",
-    "filename": "/tmp/gps-events.log",
-    "appendNewline": true,
-    "createDir": false,
-    "overwriteFile": "false",
-    "encoding": "none",
-    "x": 1300,
-    "y": 760,
-    "wires": [
-      []
-    ]
-  },
-  {
-    "id": "fe51d2b0069aee89",
-    "type": "function",
-    "z": "052a8592cc8aee65",
-    "name": "Log Formatter",
-    "func": "// Format log entries for file output\n\nif (msg.topic === 'gps/log' && msg.payload) {\n    const logLevel = flow.get('config_log_level') || 'info';\n    const levels = {debug: 0, info: 1, warn: 2, error: 3};\n    \n    const msgLevel = levels[msg.payload.level] || 1;\n    const configLevel = levels[logLevel] || 1;\n    \n    // Only log if message level is >= configured level\n    if (msgLevel >= configLevel) {\n        const formatted = JSON.stringify(msg.payload);\n        return {payload: formatted};\n    }\n}\n\nreturn null;",
-    "outputs": 1,
-    "noerr": 0,
-    "initialize": "",
-    "finalize": "",
-    "libs": [],
-    "x": 1240,
-    "y": 660,
-    "wires": [
-      [
-        "3a90bc39e6b61d2a"
-      ]
-    ]
-  },
-  {
-    "id": "8c42f9e4b72479ac",
-    "type": "function",
-    "z": "052a8592cc8aee65",
-    "name": "Enhanced Error Handler",
-    "func": "// Enhanced Error Handler with retry logic and fallback\n\nconst errorSource = msg.errorSource || 'unknown';\nconst errorMsg = msg.payload || 'Unknown error';\nconst now = Date.now();\n\n// Track error counts\nlet errorCounts = flow.get('error_counts') || {};\nerrorCounts[errorSource] = (errorCounts[errorSource] || 0) + 1;\nflow.set('error_counts', errorCounts);\n\n// Log the error\nconst logEntry = {\n    ts: new Date().toISOString(),\n    level: 'error',\n    event: 'error_occurred',\n    data: {\n        source: errorSource,\n        message: errorMsg,\n        count: errorCounts[errorSource],\n        raw: msg\n    }\n};\n\n// Store in event logs\nlet logs = flow.get('event_logs') || [];\nlogs.push(logEntry);\nif (logs.length > 100) logs = logs.slice(-100);\nflow.set('event_logs', logs);\n\n// Determine if we should implement fallback behavior\nif (errorSource === 'starlink' && errorCounts.starlink > 3) {\n    // Too many Starlink errors, prefer RUTOS\n    flow.set('starlink_degraded', true);\n    flow.set('starlink_degraded_until', now + 600000); // 10 minutes\n} else if (errorSource === 'rutos' && errorCounts.rutos > 3) {\n    // Too many RUTOS errors, prefer Starlink\n    flow.set('rutos_degraded', true);\n    flow.set('rutos_degraded_until', now + 600000); // 10 minutes\n}\n\n// Reset error counts periodically\nif (!flow.get('error_reset_timer')) {\n    flow.set('error_reset_timer', now);\n} else if (now - flow.get('error_reset_timer') > 3600000) { // 1 hour\n    flow.set('error_counts', {});\n    flow.set('error_reset_timer', now);\n}\n\nreturn [\n    {topic: 'gps/log', payload: logEntry},\n    {topic: 'gps/error', payload: {source: errorSource, message: errorMsg, count: errorCounts[errorSource]}}\n];",
-    "outputs": 2,
-    "noerr": 0,
-    "initialize": "",
-    "finalize": "",
-    "libs": [],
-    "x": 1010,
-    "y": 500,
-    "wires": [
-      [
-        "fe51d2b0069aee89"
-      ],
-      [
-        "4bc9c9df5144215e"
-      ]
-    ]
-  },
-  {
-    "id": "4bc9c9df5144215e",
-    "type": "debug",
-    "z": "052a8592cc8aee65",
-    "name": "Error Debug",
-    "active": true,
-    "tosidebar": true,
-    "console": false,
-    "tostatus": false,
-    "complete": "payload",
-    "targetType": "msg",
-    "x": 710,
-    "y": 960,
-    "wires": []
-  },
-  {
-    "id": "c380db185b9d6095",
-    "type": "mqtt in",
-    "z": "052a8592cc8aee65",
-    "name": "IDs listener",
-    "topic": "device/+/DBus",
-    "qos": "2",
-    "datatype": "auto-detect",
-    "broker": "2712849475d6de23",
-    "nl": false,
-    "rap": true,
-    "rh": 0,
-    "inputs": 0,
-    "x": 130,
-    "y": 40,
-    "wires": [
-      [
-        "3208ed25342a77e9"
-      ]
-    ]
-  },
-  {
-    "id": "3208ed25342a77e9",
-    "type": "json",
-    "z": "052a8592cc8aee65",
-    "name": "",
-    "property": "payload",
-    "action": "",
-    "pretty": false,
-    "x": 300,
-    "y": 40,
-    "wires": [
-      [
-        "25cedf93982c9bf7"
-      ]
-    ]
-  },
-  {
-    "id": "8c394714af33f7e8",
-    "type": "inject",
-    "z": "052a8592cc8aee65",
-    "name": "Every 30 min",
-    "props": [],
-    "repeat": "1800",
-    "crontab": "",
-    "once": true,
-    "onceDelay": "1",
-    "topic": "",
-    "x": 130,
-    "y": 180,
-    "wires": [
-      [
-        "2dd537dd208339ef"
-      ]
-    ]
-  },
-  {
-    "id": "2dd537dd208339ef",
-    "type": "function",
-    "z": "052a8592cc8aee65",
-    "name": "Trigger Branches",
-    "func": "// TODO: Replace with your actual RUTOS credentials\n// For security, consider using environment variables or Node-RED credentials\nreturn [{payload:\"go\"},{payload:{username:\"admin\",password:\"YOUR_RUTOS_PASSWORD_HERE\"}}];",
-    "outputs": 2,
-    "timeout": "",
-    "noerr": 0,
-    "initialize": "",
-    "finalize": "",
-    "libs": [],
-    "x": 330,
-    "y": 180,
-    "wires": [
-      [
-        "10a3a2c7e202183f"
-      ],
-      [
-        "f236b706a467f934"
-      ]
-    ]
-  },
-  {
-    "id": "10a3a2c7e202183f",
-    "type": "exec",
-    "z": "052a8592cc8aee65",
-    "command": "/data/bin/grpcurl -plaintext -emit-defaults -d '{\"get_diagnostics\":{}}' 192.168.100.1:9200 SpaceX.API.Device.Device/Handle",
-    "addpay": false,
-    "append": "",
-    "useSpawn": "false",
-    "timer": "10",
-    "winHide": false,
-    "oldrc": false,
-    "name": "Get Starlink GPS",
-    "x": 570,
-    "y": 140,
-    "wires": [
-      [
-        "84975868aa8b14d8"
-      ],
-      [
-        "74fe6fa9c30dbbfa"
-      ],
-      []
-    ]
-  },
-  {
-    "id": "84975868aa8b14d8",
-    "type": "json",
-    "z": "052a8592cc8aee65",
-    "name": "",
-    "property": "payload",
-    "action": "",
-    "pretty": false,
-    "x": 750,
-    "y": 120,
-    "wires": [
-      [
-        "de57523fd724719b"
-      ]
-    ]
-  },
-  {
-    "id": "de57523fd724719b",
-    "type": "function",
-    "z": "052a8592cc8aee65",
-    "name": "Format Starlink GPS",
-    "func": "msg.topic = \"starlink\";\n\nvar diag = msg.payload && msg.payload.dishGetDiagnostics;\nif (!diag || !diag.location) {\n    // Send error to error handler\n    node.send([null, {errorSource: 'starlink', payload: 'No diagnostics or location data'}]);\n    return null;\n}\n\nvar loc = diag.location;\nif (loc.latitude == null || loc.longitude == null || loc.altitudeMeters == null) {\n    node.send([null, {errorSource: 'starlink', payload: 'Missing coordinate data'}]);\n    return null;\n}\n\nvar o = {\n    lat   : +loc.latitude,\n    lon   : +loc.longitude,\n    alt   : +loc.altitudeMeters,\n    gpsFix: loc.uncertaintyMetersValid ? 1 : 0\n};\nif (loc.uncertaintyMetersValid && loc.uncertaintyMeters != null) {\n    o.hAcc = +loc.uncertaintyMeters;      // horizontal accuracy (m)\n}\nmsg.payload = o;\nreturn [msg, null];",
-    "outputs": 2,
-    "timeout": "",
-    "noerr": 0,
-    "initialize": "",
-    "finalize": "",
-    "libs": [],
-    "x": 960,
-    "y": 120,
-    "wires": [
-      [
-        "2b5e76c5eb2dce12",
-        "e7d0663bcdd44a06"
-      ],
-      [
-        "8c42f9e4b72479ac"
-      ]
-    ]
-  },
-  {
-    "id": "74fe6fa9c30dbbfa",
-    "type": "function",
-    "z": "052a8592cc8aee65",
-    "name": "Starlink fail",
-    "func": "msg.topic=\"starlink\";\nmsg.payload=null;\n\n// Send to error handler\nnode.send([msg, {errorSource: 'starlink', payload: 'gRPC command failed: ' + JSON.stringify(msg)}]);\n\nreturn [msg, null];",
-    "outputs": 2,
-    "timeout": "",
-    "noerr": 0,
-    "initialize": "",
-    "finalize": "",
-    "libs": [],
-    "x": 800,
-    "y": 180,
-    "wires": [
-      [
-        "2b5e76c5eb2dce12"
-      ],
-      [
-        "8c42f9e4b72479ac"
-      ]
-    ]
-  },
-  {
-    "id": "f236b706a467f934",
-    "type": "http request",
-    "z": "052a8592cc8aee65",
-    "name": "RUTOS login",
-    "method": "POST",
-    "ret": "json",
-    "paytoqs": "ignore",
-    "url": "https://192.168.80.1/api/login",
-    "tls": "19c194ce1c405d3a",
-    "persist": false,
-    "proxy": "",
-    "insecureHTTPParser": false,
-    "authType": "",
-    "senderr": false,
-    "headers": [
-      {
-        "keyType": "other",
-        "keyValue": "Content-Type",
-        "valueType": "other",
-        "valueValue": "application/json"
-      }
-    ],
-    "x": 550,
-    "y": 260,
-    "wires": [
-      [
-        "d863193107c568b7"
-      ]
-    ]
-  },
-  {
-    "id": "d863193107c568b7",
-    "type": "function",
-    "z": "052a8592cc8aee65",
-    "name": "Set auth header",
-    "func": "const p=typeof msg.payload==='string'?JSON.parse(msg.payload):msg.payload;\nconst t=p?.data?.token;\nif(!t){\n    // Send to error handler\n    node.send([null, {errorSource: 'rutos', payload: 'No authentication token received'}]);\n    return null;\n}\nmsg.headers={Authorization:`Bearer ${t}`};\nmsg.payload={};\nreturn [msg, null];",
-    "outputs": 2,
-    "timeout": "",
-    "noerr": 0,
-    "initialize": "",
-    "finalize": "",
-    "libs": [],
-    "x": 800,
-    "y": 260,
-    "wires": [
-      [
-        "015d60b5aea849b4"
-      ],
-      [
-        "8c42f9e4b72479ac"
-      ]
-    ]
-  },
-  {
-    "id": "015d60b5aea849b4",
-    "type": "http request",
-    "z": "052a8592cc8aee65",
-    "name": "Get RUTOS GPS",
-    "method": "GET",
-    "ret": "obj",
-    "paytoqs": "ignore",
-    "url": "https://192.168.80.1/api/gps/position/status",
-    "tls": "19c194ce1c405d3a",
-    "persist": false,
-    "proxy": "",
-    "insecureHTTPParser": false,
-    "authType": "",
-    "senderr": false,
-    "headers": [],
-    "x": 570,
-    "y": 340,
-    "wires": [
-      [
-        "fd3b972f28865fea",
-        "1ab986af44cca762"
-      ]
-    ]
-  },
-  {
-    "id": "fd3b972f28865fea",
-    "type": "function",
-    "z": "052a8592cc8aee65",
-    "name": "Format RUTOS GPS",
-    "func": "msg.topic = \"rutos\";\n\nvar d = msg.payload && msg.payload.data;\nif (!d) {\n    node.send([null, {errorSource: 'rutos', payload: 'No GPS data received'}]);\n    return null;\n}\n\nvar fix = parseInt(d.fix_status, 10) || 0;\nif (d.latitude == null || d.longitude == null || d.altitude == null) {\n    node.send([null, {errorSource: 'rutos', payload: 'Missing coordinate data'}]);\n    return null;\n}\n\nvar o = {\n    lat   : +d.latitude,\n    lon   : +d.longitude,\n    alt   : +d.altitude,\n    gpsFix: fix\n};\n\nif (d.satellites != null) o.sats = +d.satellites;   // satellite count\nif (d.accuracy  != null) o.hAcc = +d.accuracy;      // HDOP (m)\nif (d.speed     != null) {\n    var s = +d.speed;                               // km / h\n    if (!isNaN(s)) o.speed = s * 0.277777778;       // → m / s\n}\nmsg.payload = o;\nreturn [msg, null];",
-    "outputs": 2,
-    "timeout": "",
-    "noerr": 0,
-    "initialize": "",
-    "finalize": "",
-    "libs": [],
-    "x": 800,
-    "y": 340,
-    "wires": [
-      [
-        "2b5e76c5eb2dce12",
-        "e3dff9260e2223fb"
-      ],
-      [
-        "8c42f9e4b72479ac"
-      ]
-    ]
-  },
-  {
-    "id": "2b5e76c5eb2dce12",
-    "type": "join",
-    "z": "052a8592cc8aee65",
-    "name": "Combine GPS",
-    "mode": "custom",
-    "build": "object",
-    "property": "payload",
-    "propertyType": "msg",
-    "key": "topic",
-    "joiner": "\\n",
-    "joinerType": "str",
-    "accumulate": false,
-    "timeout": "15",
-    "count": "2",
-    "reduceRight": false,
-    "x": 1200,
-    "y": 180,
-    "wires": [
-      [
-        "fb3f6f8d9478837a",
-        "7a40dacb6ed111fe"
-      ]
-    ]
-  },
-  {
-    "id": "fb3f6f8d9478837a",
-    "type": "function",
-    "z": "052a8592cc8aee65",
-    "name": "Enhanced GPS Logic",
-    "func": "// Enhanced GPS Processing with configurable thresholds and smart movement logic\n\n// ===== UTILITY FUNCTIONS =====\nfunction hav(p1, p2) {\n    const R = 6371000, rad = Math.PI / 180;\n    const dLat = (p2.lat - p1.lat) * rad, dLon = (p2.lon - p1.lon) * rad;\n    const lat1 = p1.lat * rad, lat2 = p2.lat * rad;\n    const a = Math.sin(dLat / 2) ** 2 + Math.cos(lat1) * Math.cos(lat2) * Math.sin(dLon / 2) ** 2;\n    return R * 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1 - a));\n}\n\nfunction logEvent(level, event, data) {\n    const logEntry = {\n        ts: new Date().toISOString(),\n        level: level,\n        event: event,\n        data: data\n    };\n    \n    // Store recent logs in flow context (last 100 entries)\n    let logs = flow.get('event_logs') || [];\n    logs.push(logEntry);\n    if (logs.length > 100) logs = logs.slice(-100);\n    flow.set('event_logs', logs);\n    \n    // Send to logging output (4th output)\n    node.send([null, null, null, { payload: logEntry, topic: 'gps/log' }]);\n}\n\n// ===== CONFIGURABLE PARAMETERS =====\nconst config = {\n    // GPS quality thresholds - Updated with data-driven values\n    rutosAccuracyThreshold: flow.get('config_rutos_accuracy') || 1,        // Data-driven: 1m (2x degradation from 0.5m typical)\n    starlinkAccuracyThreshold: flow.get('config_starlink_accuracy') || 7,  // Data-driven: 7m (avg 5.5m + buffer)\n    \n    // Change detection thresholds - Updated with data-driven values\n    positionEpsilon: flow.get('config_position_eps') || 6,                 // Data-driven: 6m (max observed 5.2m + buffer)\n    altitudeThreshold: flow.get('config_altitude_threshold') || 18,        // Data-driven: 18m (p95 15.4m + buffer)\n    speedThreshold: flow.get('config_speed_threshold') || 0.1,             // km/h\n    \n    // Movement detection\n    campingMoveThreshold: flow.get('config_camping_threshold') || 50,      // meters\n    resetObstructionThreshold: flow.get('config_obstruction_threshold') || 200, // meters\n    stationaryTimeThreshold: flow.get('config_stationary_time') || 300000, // 5 min in ms\n    gpsStabilityThreshold: flow.get('config_gps_stability_threshold') || 6, // Data-driven: 6m (max jitter 4.7m + buffer)\n    \n    // Source override\n    sourceOverride: flow.get('config_source_override') || 'auto'          // 'auto', 'rutos', 'starlink'\n};\n\n// ===== DATA PREPARATION =====\nconst star = msg.payload.starlink || {};\nconst rut = msg.payload.rutos || {};\nconst last = flow.get('last_position') || {};\nconst victronStored = flow.get('victron_stored_position') || {};\nconst now = Date.now();\nconst forceUpdate = flow.get('force_next_update');\n\nlogEvent('debug', 'gps_processing_start', { star: !!star.lat, rutos: !!rut.lat, override: config.sourceOverride, force: !!forceUpdate });\n\n// Check for degraded sources\nconst starlinkDegraded = flow.get('starlink_degraded') && now < (flow.get('starlink_degraded_until') || 0);\nconst rutosDegraded = flow.get('rutos_degraded') && now < (flow.get('rutos_degraded_until') || 0);\n\n// ===== SOURCE SELECTION WITH OVERRIDE =====\nlet src, srcData;\n\n// Manual override logic\nif (config.sourceOverride === 'rutos' && rut.gpsFix > 0 && !rutosDegraded) {\n    src = 'rutos';\n    srcData = rut;\n    logEvent('info', 'source_override_rutos', rut);\n} else if (config.sourceOverride === 'starlink' && star.gpsFix > 0 && !starlinkDegraded) {\n    src = 'starlink';\n    srcData = star;\n    logEvent('info', 'source_override_starlink', star);\n} else {\n    // Automatic source selection with configurable thresholds and degradation awareness\n    const goodRut = rut.gpsFix > 0 && Number.isFinite(rut.hAcc) && rut.hAcc < config.rutosAccuracyThreshold && !rutosDegraded;\n    const goodStar = star.gpsFix > 0 && Number.isFinite(star.hAcc) && star.hAcc < config.starlinkAccuracyThreshold && !starlinkDegraded;\n    \n    if (goodRut && goodStar) {\n        src = (rut.hAcc <= star.hAcc) ? 'rutos' : 'starlink';\n        srcData = src === 'rutos' ? rut : star;\n        logEvent('info', 'auto_source_best_accuracy', { selected: src, rutosAcc: rut.hAcc, starlinkAcc: star.hAcc });\n    } else if (goodRut) {\n        src = 'rutos';\n        srcData = rut;\n        logEvent('info', 'auto_source_rutos_only', rut);\n    } else if (goodStar) {\n        src = 'starlink'; \n        srcData = star;\n        logEvent('info', 'auto_source_starlink_only', star);\n    } else {\n        // Fallback to last known position with degraded accuracy\n        if (last.lat && last.lon) {\n            logEvent('warn', 'fallback_last_position', { age: now - (last.ts || 0), starlinkDegraded, rutosDegraded });\n            return [\n                {\n                    payload: {\n                        ...last,\n                        gpsFix: 0,\n                        hAcc: 999,\n                        source: 'fallback',\n                        ts: now\n                    }\n                },\n                null, null, null\n            ];\n        }\n        logEvent('error', 'no_gps_sources_available', { rutos: rut, starlink: star, degraded: {starlink: starlinkDegraded, rutos: rutosDegraded} });\n        return null;\n    }\n}\n\n// ===== POSITION PROCESSING =====\nlet c = {\n    lat: srcData.lat,\n    lon: srcData.lon, \n    alt: srcData.alt,\n    gpsFix: srcData.gpsFix,\n    hAcc: srcData.hAcc,\n    sats: srcData.sats,\n    source: src,\n    ts: now\n};\n\n// Speed calculation\nif (Number.isFinite(srcData.speed)) {\n    c.speed = srcData.speed;\n} else if (Number.isFinite(last.lat) && Number.isFinite(last.lon) && last.ts) {\n    const m = hav(last, c);\n    const sec = (now - last.ts) / 1000;\n    c.speed = sec > 0 ? (m / sec) * 3.6 : 0; // km/h\n} else {\n    c.speed = 0;\n}\n\n// ===== MOVEMENT ANALYSIS =====\nconst movedFromLast = Number.isFinite(last.lat) ? hav(last, c) : 0;\nconst movedFromVictron = Number.isFinite(victronStored.lat) ? hav(victronStored, c) : 0;\nconst timeSinceLastMove = last.ts ? now - last.ts : 0;\nconst isStationary = timeSinceLastMove > config.stationaryTimeThreshold && c.speed < 1;\n\nlogEvent('debug', 'movement_analysis', {\n    movedFromLast: movedFromLast.toFixed(1),\n    movedFromVictron: movedFromVictron.toFixed(1),\n    timeSinceLastMove: Math.round(timeSinceLastMove / 1000),\n    isStationary: isStationary,\n    speed: c.speed\n});\n\n// ===== CHANGE DETECTION =====\n// Updated to use distance-based position comparison with data-driven thresholds\nconst posChanged = Number.isFinite(last.lat) && Number.isFinite(last.lon) ? \n                   hav(last, c) > config.positionEpsilon : true;  // Use Haversine distance in meters\nconst altChanged = Math.abs((last.alt || 0) - c.alt) > config.altitudeThreshold;\nconst speedChanged = Math.abs((last.speed || 0) - c.speed) > config.speedThreshold;\nconst changed = posChanged || altChanged || speedChanged || forceUpdate;\n\n// Update stored position\nflow.set('last_position', { ...c, ts: now });\n\n// Clear force update flag\nif (forceUpdate) {\n    flow.set('force_next_update', false);\n    logEvent('info', 'force_update_processed', {});\n}\n\nif (!changed) {\n    logEvent('debug', 'no_significant_change', { posChanged, altChanged, speedChanged });\n    return null;\n}\n\n// ===== OUTPUT LOGIC =====\nlet outputs = [null, null, null, null]; // [update, obstruction_reset, victron_update, log]\n\n// Track accuracy statistics for both sources\nif (src === 'rutos' && Number.isFinite(rut.hAcc)) {\n    let rutosStats = flow.get('rutos_accuracy_stats') || {readings: [], sum: 0, count: 0, avg: 0};\n    rutosStats.readings.push(rut.hAcc);\n    if (rutosStats.readings.length > 100) rutosStats.readings = rutosStats.readings.slice(-100);\n    rutosStats.sum += rut.hAcc;\n    rutosStats.count++;\n    rutosStats.avg = rutosStats.sum / rutosStats.count;\n    flow.set('rutos_accuracy_stats', rutosStats);\n} else if (src === 'starlink' && Number.isFinite(star.hAcc)) {\n    let starlinkStats = flow.get('starlink_accuracy_stats') || {readings: [], sum: 0, count: 0, avg: 0};\n    starlinkStats.readings.push(star.hAcc);\n    if (starlinkStats.readings.length > 100) starlinkStats.readings = starlinkStats.readings.slice(-100);\n    starlinkStats.sum += star.hAcc;\n    starlinkStats.count++;\n    starlinkStats.avg = starlinkStats.sum / starlinkStats.count;\n    flow.set('starlink_accuracy_stats', starlinkStats);\n}\n\n// GPS Stability Monitoring - Track position jitter with data-driven threshold\nlet positionHistory = flow.get(src + '_position_history') || [];\npositionHistory.push({lat: c.lat, lon: c.lon, ts: now});\nif (positionHistory.length > 20) positionHistory = positionHistory.slice(-20); // Keep last 20 positions\nflow.set(src + '_position_history', positionHistory);\n\n// Calculate recent GPS jitter (last 10 positions)\nif (positionHistory.length >= 10) {\n    const recent = positionHistory.slice(-10);\n    const distances = [];\n    for (let i = 1; i < recent.length; i++) {\n        distances.push(hav(recent[i-1], recent[i]));\n    }\n    const maxJitter = Math.max(...distances);\n    const avgJitter = distances.reduce((a, b) => a + b, 0) / distances.length;\n    \n    // Check for GPS instability using data-driven threshold\n    if (maxJitter > config.gpsStabilityThreshold) {\n        logEvent('warn', 'gps_instability_detected', {\n            source: src,\n            maxJitter: maxJitter.toFixed(1),\n            avgJitter: avgJitter.toFixed(1),\n            threshold: config.gpsStabilityThreshold,\n            accuracy: c.hAcc\n        });\n    }\n}\n\n// Always send GPS update (output 1)\noutputs[0] = { payload: c };\n\n// Obstruction map reset logic (output 2)\n// Reset if: moved significantly AND (camping move OR been stationary)\nif (movedFromLast > config.resetObstructionThreshold && \n    (movedFromLast < 1000 || isStationary)) { // < 1km suggests camping, not highway driving\n    \n    logEvent('info', 'obstruction_reset_triggered', {\n        distance: movedFromLast.toFixed(1),\n        reason: movedFromLast < 1000 ? 'camping_move' : 'stationary_then_moved'\n    });\n    \n    outputs[1] = { \n        payload: c, \n        distance: movedFromLast,\n        reason: 'position_change'\n    };\n}\n\n// Victron GPS update logic (output 3)\n// Update if: significant move from stored Victron position OR been 5+ minutes since last Victron update\nconst lastVictronUpdate = flow.get('last_victron_update') || 0;\nconst victronUpdateNeeded = movedFromVictron > config.campingMoveThreshold || \n                           (now - lastVictronUpdate) > 300000; // 5 minutes\n\nif (victronUpdateNeeded || forceUpdate) {\n    logEvent('info', 'victron_update_triggered', {\n        distanceFromStored: movedFromVictron.toFixed(1),\n        timeSinceLastUpdate: Math.round((now - lastVictronUpdate) / 1000),\n        reason: forceUpdate ? 'forced' : (movedFromVictron > config.campingMoveThreshold ? 'position_change' : 'time_based')\n    });\n    \n    flow.set('last_victron_update', now);\n    outputs[2] = { payload: c };\n}\n\nlogEvent('info', 'gps_processing_complete', {\n    source: src,\n    position: `${c.lat.toFixed(6)}, ${c.lon.toFixed(6)}`,\n    accuracy: c.hAcc,\n    outputs: {\n        update: !!outputs[0],\n        obstruction: !!outputs[1], \n        victron: !!outputs[2]\n    }\n});\n\nreturn outputs;",
-    "outputs": 4,
-    "timeout": "",
-    "noerr": 0,
-    "initialize": "",
-    "finalize": "",
-    "libs": [],
-    "x": 1450,
-    "y": 180,
-    "wires": [
-      [
-        "df60837fdef6ee90"
-      ],
-      [
-        "abaf331e329a7829",
-        "bdb24cd84e9befd5"
-      ],
-      [
-        "5d6237d293375110"
-      ],
-      [
-        "fe51d2b0069aee89"
-      ]
-    ]
-  },
-  {
-    "id": "d574da3f1115d8ae",
-    "type": "mqtt in",
-    "z": "052a8592cc8aee65",
-    "name": "GPS tap",
-    "topic": "W/+/gps/+/+/#",
-    "qos": "2",
-    "datatype": "auto-detect",
-    "broker": "2712849475d6de23",
-    "nl": false,
-    "rap": false,
-    "rh": 0,
-    "inputs": 0,
-    "x": 130,
-    "y": 480,
-    "wires": [
-      [
-        "feb0d0729183301f"
-      ]
-    ]
-  },
-  {
-    "id": "937eee210ea09a90",
-    "type": "debug",
-    "z": "052a8592cc8aee65",
-    "name": "Pretty GPS",
-    "active": true,
-    "tosidebar": true,
-    "console": false,
-    "tostatus": false,
-    "complete": "payload",
-    "targetType": "msg",
-    "statusVal": "",
-    "statusType": "auto",
-    "x": 650,
-    "y": 480,
-    "wires": []
-  },
-  {
-    "id": "e7d0663bcdd44a06",
-    "type": "debug",
-    "z": "052a8592cc8aee65",
-    "d": true,
-    "name": "Format Starlink GPS",
-    "active": true,
-    "tosidebar": true,
-    "console": false,
-    "tostatus": false,
-    "complete": "payload",
-    "targetType": "msg",
-    "statusVal": "",
-    "statusType": "auto",
-    "x": 1220,
-    "y": 100,
-    "wires": []
-  },
-  {
-    "id": "e3dff9260e2223fb",
-    "type": "debug",
-    "z": "052a8592cc8aee65",
-    "d": true,
-    "name": "Format RUTOS GPS",
-    "active": true,
-    "tosidebar": true,
-    "console": false,
-    "tostatus": false,
-    "complete": "payload",
-    "targetType": "msg",
-    "statusVal": "",
-    "statusType": "auto",
-    "x": 1080,
-    "y": 400,
-    "wires": []
-  },
-  {
-    "id": "df60837fdef6ee90",
-    "type": "debug",
-    "z": "052a8592cc8aee65",
-    "name": "Combined",
-    "active": true,
-    "tosidebar": true,
-    "console": false,
-    "tostatus": false,
-    "complete": "payload",
-    "targetType": "msg",
-    "statusVal": "",
-    "statusType": "auto",
-    "x": 1730,
-    "y": 100,
-    "wires": []
-  },
-  {
-    "id": "abaf331e329a7829",
-    "type": "debug",
-    "z": "052a8592cc8aee65",
-    "name": "Moved >200m",
-    "active": true,
-    "tosidebar": true,
-    "console": false,
-    "tostatus": false,
-    "complete": "payload",
-    "targetType": "msg",
-    "statusVal": "",
-    "statusType": "auto",
-    "x": 1720,
-    "y": 320,
-    "wires": []
-  },
-  {
-    "id": "96272080f917e69d",
-    "type": "function",
-    "z": "052a8592cc8aee65",
-    "name": "Flush pending",
-    "func": "const p = flow.get('pending_gps');\nif (p) node.send({payload: p});",
-    "outputs": 1,
-    "timeout": "",
-    "noerr": 0,
-    "initialize": "",
-    "finalize": "",
-    "libs": [],
-    "x": 1100,
-    "y": 40,
-    "wires": [
-      [
-        "5d6237d293375110"
-      ]
-    ]
-  },
-  {
-    "id": "25cedf93982c9bf7",
-    "type": "function",
-    "z": "052a8592cc8aee65",
-    "name": "IDs learned (patched)",
-    "func": "const pl=msg.payload;\nif(pl&&pl.portalId&&pl.deviceInst){global.set('vrm_portal_id',pl.portalId);\nflow.set('gps_device_instance',pl.deviceInst);}\nreturn[ msg, msg ];",
-    "outputs": 2,
-    "timeout": "",
-    "noerr": 0,
-    "initialize": "",
-    "finalize": "",
-    "libs": [],
-    "x": 620,
-    "y": 40,
-    "wires": [
-      [
-        "3088e0bb7e5c5040"
-      ],
-      [
-        "96272080f917e69d"
-      ]
-    ]
-  },
-  {
-    "id": "3088e0bb7e5c5040",
-    "type": "debug",
-    "z": "052a8592cc8aee65",
-    "d": true,
-    "name": "IDs learned",
-    "active": true,
-    "tosidebar": true,
-    "console": false,
-    "tostatus": false,
-    "complete": "true",
-    "x": 850,
-    "y": 20,
-    "wires": []
-  },
-  {
-    "id": "5d6237d293375110",
-    "type": "function",
-    "z": "052a8592cc8aee65",
-    "name": "Format Victron MQTT (direct)",
-    "func": "var portal = global.get('vrm_portal_id');\nif (!portal) {\n    flow.set('pending_gps', msg.payload);\n    return null;\n}\nflow.set('pending_gps', null);\n\nvar dev = flow.get('gps_device_instance') || '1';\nvar base = 'W/' + portal + '/gps/' + dev;\nvar r = (n, d) => Number.isFinite(n) ? +n.toFixed(d) : n;\n\nvar out = [\n    { topic: base + '/Position/Latitude',  payload: JSON.stringify({ value: r(msg.payload.lat, 6) }) },\n    { topic: base + '/Position/Longitude', payload: JSON.stringify({ value: r(msg.payload.lon, 6) }) },\n    { topic: base + '/Altitude',           payload: JSON.stringify({ value: r(msg.payload.alt, 1) }) },\n    { topic: base + '/Speed',              payload: JSON.stringify({ value: r(msg.payload.speed, 2) }) },\n    { topic: base + '/Fix',                payload: JSON.stringify({ value: msg.payload.gpsFix || 0 }) }\n];\n\nif (msg.payload.sats != null)\n    out.push({ topic: base + '/NrOfSatellites', payload: JSON.stringify({ value: msg.payload.sats }) });\n\nif (msg.payload.hAcc != null)\n    out.push({ topic: base + '/Hdop', payload: JSON.stringify({ value: r(msg.payload.hAcc, 1) }) });\n\nout.forEach(node.send);\nreturn null;\n",
-    "outputs": 1,
-    "timeout": "",
-    "noerr": 0,
-    "initialize": "",
-    "finalize": "",
-    "libs": [],
-    "x": 1780,
-    "y": 40,
-    "wires": [
-      [
-        "5d8fad924d8906d6",
-        "bc8b6d8bb03396ce"
-      ]
-    ]
-  },
-  {
-    "id": "5d8fad924d8906d6",
-    "type": "mqtt out",
-    "z": "052a8592cc8aee65",
-    "name": "Victron MQTT",
-    "topic": "",
-    "qos": "2",
-    "retain": "false",
-    "respTopic": "",
-    "contentType": "",
-    "userProps": "",
-    "correl": "",
-    "expiry": "",
-    "broker": "2712849475d6de23",
-    "x": 2060,
-    "y": 40,
-    "wires": []
-  },
-  {
-    "id": "bc8b6d8bb03396ce",
-    "type": "debug",
-    "z": "052a8592cc8aee65",
-    "name": "debug MQTT out",
-    "active": true,
-    "tosidebar": true,
-    "console": true,
-    "tostatus": false,
-    "complete": "payload",
-    "targetType": "msg",
-    "statusVal": "",
-    "statusType": "auto",
-    "x": 2070,
-    "y": 100,
-    "wires": []
-  },
-  {
-    "id": "cddff0074ff0367a",
-    "type": "function",
-    "z": "052a8592cc8aee65",
-    "name": "Cache & pretty",
-    "func": "// tolerate either a raw string or a decoded object\nconst raw = (typeof msg.payload === 'string') ? JSON.parse(msg.payload) : msg.payload;\n\nconst parts  = msg.topic.split('/');\nconst portal = parts[1];\nconst dev    = parts[3];\nconst path   = parts.slice(4).join('/');\n\nconst cache = flow.get('last_position') || {};\nif (path === 'Position/Latitude')  cache.lat   = +raw.value;\nif (path === 'Position/Longitude') cache.lon   = +raw.value;\nif (path === 'Altitude')           cache.alt   = +raw.value;\nif (path === 'Speed')              cache.speed = +raw.value;\ncache.ts = Date.now();\nflow.set('last_position', cache);\n\nmsg.payload = { portalId: portal, deviceInst: dev, path, value: raw.value };\nreturn msg;",
-    "outputs": 1,
-    "noerr": 0,
-    "initialize": "",
-    "finalize": "",
-    "libs": [],
-    "x": 460,
-    "y": 480,
-    "wires": [
-      [
-        "937eee210ea09a90"
-      ]
-    ]
-  },
-  {
-    "id": "feb0d0729183301f",
-    "type": "json",
-    "z": "052a8592cc8aee65",
-    "name": "",
-    "property": "payload",
-    "action": "",
-    "pretty": false,
-    "x": 290,
-    "y": 480,
-    "wires": [
-      [
-        "cddff0074ff0367a"
-      ]
-    ]
-  },
-  {
-    "id": "bdb24cd84e9befd5",
-    "type": "exec",
-    "z": "052a8592cc8aee65",
-    "command": "/data/bin/grpcurl -plaintext -d {\\\"dish_clear_obstruction_map\\\":{}} 192.168.100.1:9200 SpaceX.API.Device.Device/Handle",
-    "addpay": false,
-    "append": "",
-    "useSpawn": "false",
-    "timer": "10",
-    "winHide": false,
-    "oldrc": false,
-    "name": "Reset Obstruction Map",
-    "x": 1740,
-    "y": 380,
-    "wires": [
-      [
-        "05c0703c81a0c758"
-      ],
-      [],
-      []
-    ]
-  },
-  {
-    "id": "05c0703c81a0c758",
-    "type": "debug",
-    "z": "052a8592cc8aee65",
-    "name": "Debug Reset Obstruction",
-    "active": true,
-    "tosidebar": true,
-    "console": false,
-    "tostatus": true,
-    "complete": "payload",
-    "targetType": "msg",
-    "statusVal": "payload",
-    "statusType": "auto",
-    "x": 2010,
-    "y": 440,
-    "wires": []
-  },
-  {
-    "id": "1ab986af44cca762",
-    "type": "debug",
-    "z": "052a8592cc8aee65",
-    "d": true,
-    "name": "Debug RUTOS GPS",
-    "active": true,
-    "tosidebar": true,
-    "console": false,
-    "tostatus": true,
-    "complete": "payload",
-    "targetType": "msg",
-    "statusVal": "payload",
-    "statusType": "auto",
-    "x": 800,
-    "y": 400,
-    "wires": []
-  },
-  {
-    "id": "7a40dacb6ed111fe",
-    "type": "debug",
-    "z": "052a8592cc8aee65",
-    "name": "Combine GPS 2",
-    "active": true,
-    "tosidebar": true,
-    "console": false,
-    "tostatus": false,
-    "complete": "payload",
-    "targetType": "msg",
-    "statusVal": "",
-    "statusType": "auto",
-    "x": 1420,
-    "y": 260,
-    "wires": []
-  },
-  {
-    "id": "2712849475d6de23",
-    "type": "mqtt-broker",
-    "name": "Cerbo MQTT",
-    "broker": "localhost",
-    "port": "1883",
-    "clientid": "",
-    "autoConnect": true,
-    "usetls": false,
-    "protocolVersion": "4",
-    "keepalive": "60",
-    "cleansession": true,
-    "autoUnsubscribe": true,
-    "birthTopic": "",
-    "birthQos": "0",
-    "birthPayload": "",
-    "birthMsg": {},
-    "closeTopic": "",
-    "closeQos": "0",
-    "closePayload": "",
-    "closeMsg": {},
-    "willTopic": "",
-    "willQos": "0",
-    "willPayload": "",
-    "willMsg": {},
-    "userProps": "",
-    "sessionExpiry": ""
-  }
+    {
+        "id": "4e30d3dae1a28548",
+        "type": "tab",
+        "label": "Enhanced Victron GPS Control",
+        "disabled": false,
+        "info": "Enhanced GPS flow with:\n- Data-driven thresholds (RUTOS: 1m, Starlink: 7m, Position: 6m, Altitude: 18m)\n- Always-use-most-accurate GPS source selection\n- Smart movement detection with Haversine distance calculations\n- Enhanced error handling with fallback logic\n- Manual override system\n- File logging with accuracy tracking\n- GPS stability monitoring (6m threshold)"
+    },
+    {
+        "id": "69f4b6c6cb47b348",
+        "type": "inject",
+        "z": "4e30d3dae1a28548",
+        "name": "Initialize Config",
+        "props": [
+            {
+                "p": "payload"
+            }
+        ],
+        "repeat": "",
+        "crontab": "",
+        "once": true,
+        "onceDelay": 0.1,
+        "topic": "",
+        "payload": "init",
+        "payloadType": "str",
+        "x": 130,
+        "y": 580,
+        "wires": [
+            [
+                "68b3e26597e2c389"
+            ]
+        ]
+    },
+    {
+        "id": "68b3e26597e2c389",
+        "type": "function",
+        "z": "4e30d3dae1a28548",
+        "name": "Configuration Manager",
+        "func": "// Configuration Manager - Centralized parameter management\n\nif (msg.topic === 'config/set' && msg.payload.param && msg.payload.value !== undefined) {\n    // Set configuration parameter\n    flow.set(msg.payload.param, msg.payload.value);\n    node.status({fill: 'green', shape: 'dot', text: `Set ${msg.payload.param}: ${msg.payload.value}`});\n    return {topic: 'config/updated', payload: {param: msg.payload.param, value: msg.payload.value}};\n}\n\nif (msg.topic === 'config/get') {\n    // Get all configuration parameters\n    const config = {\n        rutos_accuracy: flow.get('config_rutos_accuracy') || 1,        // Data-driven: 1m (2x degradation from 0.5m typical)\n        starlink_accuracy: flow.get('config_starlink_accuracy') || 7,  // Data-driven: 7m (avg 5.5m + buffer)\n        position_eps: flow.get('config_position_eps') || 6,            // Data-driven: 6m (max observed 5.2m + buffer)\n        altitude_threshold: flow.get('config_altitude_threshold') || 18, // Data-driven: 18m (p95 15.4m + buffer)\n        speed_threshold: flow.get('config_speed_threshold') || 0.1,\n        camping_threshold: flow.get('config_camping_threshold') || 50,\n        obstruction_threshold: flow.get('config_obstruction_threshold') || 200,\n        gps_stability_threshold: flow.get('config_gps_stability_threshold') || 6, // Data-driven: 6m (max jitter 4.7m + buffer)\n        stationary_time: flow.get('config_stationary_time') || 300000,\n        source_override: flow.get('config_source_override') || 'auto',\n        log_level: flow.get('config_log_level') || 'info'\n    };\n    return {topic: 'config/current', payload: config};\n}\n\n// Initialize default configuration on startup\nif (msg.payload === 'init') {\n    const defaults = {\n        config_rutos_accuracy: 1,        // Data-driven: 1m (2x degradation from 0.5m typical)\n        config_starlink_accuracy: 7,     // Data-driven: 7m (avg 5.5m + buffer)\n        config_position_eps: 6,          // Data-driven: 6m (max observed 5.2m + buffer)\n        config_altitude_threshold: 18,   // Data-driven: 18m (p95 15.4m + buffer)\n        config_speed_threshold: 0.1,\n        config_camping_threshold: 50,\n        config_obstruction_threshold: 200,\n        config_gps_stability_threshold: 6, // Data-driven: 6m (max jitter 4.7m + buffer)\n        config_stationary_time: 300000,\n        config_source_override: 'auto',\n        config_log_level: 'info'\n    };\n    \n    Object.keys(defaults).forEach(key => {\n        if (flow.get(key) === undefined) {\n            flow.set(key, defaults[key]);\n        }\n    });\n    \n    node.status({fill: 'blue', shape: 'dot', text: 'Config initialized'});\n    return {topic: 'config/initialized', payload: defaults};\n}\n\nreturn null;",
+        "outputs": 1,
+        "noerr": 0,
+        "initialize": "",
+        "finalize": "",
+        "libs": [],
+        "x": 340,
+        "y": 580,
+        "wires": [
+            [
+                "1f78d507f1a76125"
+            ]
+        ]
+    },
+    {
+        "id": "1f78d507f1a76125",
+        "type": "debug",
+        "z": "4e30d3dae1a28548",
+        "name": "Config Debug",
+        "active": true,
+        "tosidebar": true,
+        "console": false,
+        "tostatus": false,
+        "complete": "payload",
+        "targetType": "msg",
+        "x": 580,
+        "y": 580,
+        "wires": []
+    },
+    {
+        "id": "40e805ea4dd5b05e",
+        "type": "mqtt in",
+        "z": "4e30d3dae1a28548",
+        "name": "Manual Override",
+        "topic": "gps/control/+",
+        "qos": "2",
+        "datatype": "auto-detect",
+        "broker": "2712849475d6de23",
+        "nl": false,
+        "rap": true,
+        "rh": 0,
+        "inputs": 0,
+        "x": 130,
+        "y": 640,
+        "wires": [
+            [
+                "9579627bd80bcce0"
+            ]
+        ]
+    },
+    {
+        "id": "9579627bd80bcce0",
+        "type": "function",
+        "z": "4e30d3dae1a28548",
+        "name": "Override Handler",
+        "func": "// Manual Override Handler\n// MQTT Topics:\n// gps/control/source - Set source override: 'auto', 'rutos', 'starlink'\n// gps/control/force_update - Force GPS update regardless of change detection\n// gps/control/reset_obstruction - Force obstruction map reset\n// gps/control/config - Set configuration parameters\n\nconst parts = msg.topic.split('/');\nconst command = parts[2];\n\nswitch (command) {\n    case 'source':\n        if (['auto', 'rutos', 'starlink'].includes(msg.payload)) {\n            flow.set('config_source_override', msg.payload);\n            node.status({fill: 'yellow', shape: 'dot', text: `Source: ${msg.payload}`});\n            return {topic: 'gps/status', payload: {command: 'source_override', value: msg.payload}};\n        }\n        break;\n        \n    case 'force_update':\n        if (msg.payload === true || msg.payload === 'true') {\n            flow.set('force_next_update', true);\n            node.status({fill: 'orange', shape: 'dot', text: 'Force update set'});\n            return {topic: 'gps/status', payload: {command: 'force_update', value: true}};\n        }\n        break;\n        \n    case 'reset_obstruction':\n        if (msg.payload === true || msg.payload === 'true') {\n            return [null, {topic: 'gps/control/obstruction_reset', payload: {forced: true}}];\n        }\n        break;\n        \n    case 'config':\n        try {\n            const config = typeof msg.payload === 'string' ? JSON.parse(msg.payload) : msg.payload;\n            if (config.param && config.value !== undefined) {\n                flow.set(`config_${config.param}`, config.value);\n                node.status({fill: 'green', shape: 'dot', text: `Config: ${config.param}`});\n                return {topic: 'gps/status', payload: {command: 'config_set', param: config.param, value: config.value}};\n            }\n        } catch (e) {\n            node.error('Invalid config JSON: ' + e.message);\n        }\n        break;\n        \n    case 'get_logs':\n        const logs = flow.get('event_logs') || [];\n        return {topic: 'gps/logs', payload: logs};\n        \n    case 'get_status':\n        const status = {\n            last_position: flow.get('last_position'),\n            victron_stored: flow.get('victron_stored_position'),\n            source_override: flow.get('config_source_override'),\n            last_update: flow.get('last_victron_update')\n        };\n        return {topic: 'gps/status', payload: status};\n        \n    case 'get_accuracy_stats':\n        // Get accuracy statistics for both sources\n        const rutosStats = flow.get('rutos_accuracy_stats') || {readings: [], avg: 0, count: 0};\n        const starlinkStats = flow.get('starlink_accuracy_stats') || {readings: [], avg: 0, count: 0};\n        \n        const stats = {\n            rutos: {\n                count: rutosStats.count,\n                average: rutosStats.avg,\n                moving_avg: rutosStats.readings.slice(-10).reduce((a, b) => a + b, 0) / Math.min(10, rutosStats.readings.length) || 0,\n                min: Math.min(...rutosStats.readings) || 0,\n                max: Math.max(...rutosStats.readings) || 0,\n                recommended_threshold: Math.ceil((rutosStats.avg || 5) * 1.5)\n            },\n            starlink: {\n                count: starlinkStats.count,\n                average: starlinkStats.avg,\n                moving_avg: starlinkStats.readings.slice(-10).reduce((a, b) => a + b, 0) / Math.min(10, starlinkStats.readings.length) || 0,\n                min: Math.min(...starlinkStats.readings) || 0,\n                max: Math.max(...starlinkStats.readings) || 0,\n                recommended_threshold: Math.ceil((starlinkStats.avg || 10) * 1.5)\n            }\n        };\n        return {topic: 'gps/accuracy_stats', payload: stats};\n}\n\nreturn null;",
+        "outputs": 2,
+        "noerr": 0,
+        "initialize": "",
+        "finalize": "",
+        "libs": [],
+        "x": 690,
+        "y": 640,
+        "wires": [
+            [
+                "2763934cfcc75e55",
+                "059197b07b297de4"
+            ],
+            [
+                "92177b031430cf7d"
+            ]
+        ]
+    },
+    {
+        "id": "2763934cfcc75e55",
+        "type": "debug",
+        "z": "4e30d3dae1a28548",
+        "name": "Override Debug",
+        "active": true,
+        "tosidebar": true,
+        "console": false,
+        "tostatus": false,
+        "complete": "payload",
+        "targetType": "msg",
+        "x": 660,
+        "y": 720,
+        "wires": []
+    },
+    {
+        "id": "459de18baab00471",
+        "type": "mqtt in",
+        "z": "4e30d3dae1a28548",
+        "name": "Read Victron GPS",
+        "topic": "R/+/gps/+/+",
+        "qos": "2",
+        "datatype": "auto-detect",
+        "broker": "2712849475d6de23",
+        "nl": false,
+        "rap": true,
+        "rh": 0,
+        "inputs": 0,
+        "x": 1330,
+        "y": 580,
+        "wires": [
+            [
+                "8f36ee628fe0c86d",
+                "afa34f92fbb23bda"
+            ]
+        ]
+    },
+    {
+        "id": "8f36ee628fe0c86d",
+        "type": "function",
+        "z": "4e30d3dae1a28548",
+        "name": "Parse Victron GPS",
+        "func": "// Parse Victron GPS Node - Put this code in your \"Parse Victron GPS\" function  \n// This version eliminates the \"Unexpected end of JSON input\" error\n\ntry {\n    // Handle completely empty payloads\n    if (!msg.payload || msg.payload === '' || msg.payload === null || msg.payload === undefined) {\n        return null;\n    }\n    \n    // Handle string payloads\n    if (typeof msg.payload === 'string') {\n        // Skip empty or whitespace-only strings\n        if (msg.payload.trim() === '') {\n            return null;\n        }\n        \n        // Only try to parse if it looks like JSON (starts with { or [)\n        const trimmed = msg.payload.trim();\n        if (trimmed.startsWith('{') || trimmed.startsWith('[')) {\n            try {\n                const parsed = JSON.parse(msg.payload);\n                msg.payload = parsed;\n            } catch (e) {\n                // If JSON parsing fails, just pass the string through\n                // This eliminates the \"Unexpected end of JSON input\" error\n                return null;\n            }\n        } else {\n            // Not JSON, might be a simple value - pass through\n            // Don't try to parse non-JSON strings\n            return { payload: msg.payload, topic: msg.topic };\n        }\n    }\n    \n    // Check if this is GPS-related data for discovery\n    const topic = msg.topic || '';\n    if (topic.includes('/gps/') && topic.includes('ProductName')) {\n        // This is a GPS discovery response\n        const topicParts = topic.split('/');\n        if (topicParts.length >= 4) {\n            const portal = topicParts[1];\n            const instance = topicParts[3];\n            \n            node.log(`📍 GPS Discovery Response: Portal ${portal}, Instance ${instance}`);\n            \n            // Store discovered info\n            global.set('vrm_portal_id', portal);\n            flow.set('gps_device_instance', instance);\n        }\n    }\n    \n    return { payload: msg.payload, topic: msg.topic };\n    \n} catch (error) {\n    // Silent error handling to prevent log spam\n    return null;\n}\n",
+        "outputs": 1,
+        "timeout": "",
+        "noerr": 0,
+        "initialize": "",
+        "finalize": "",
+        "libs": [],
+        "x": 1550,
+        "y": 860,
+        "wires": [
+            [
+                "f79fc06d7c58ca6e",
+                "65630e9831b56bca"
+            ]
+        ]
+    },
+    {
+        "id": "f79fc06d7c58ca6e",
+        "type": "debug",
+        "z": "4e30d3dae1a28548",
+        "name": "Parse Victron GPS Debug",
+        "active": true,
+        "tosidebar": true,
+        "console": false,
+        "tostatus": false,
+        "complete": "payload",
+        "targetType": "msg",
+        "statusVal": "",
+        "statusType": "auto",
+        "x": 1710,
+        "y": 960,
+        "wires": []
+    },
+    {
+        "id": "059197b07b297de4",
+        "type": "mqtt out",
+        "z": "4e30d3dae1a28548",
+        "name": "Status/Logs Output",
+        "topic": "",
+        "qos": "",
+        "retain": "",
+        "respTopic": "",
+        "contentType": "",
+        "userProps": "",
+        "correl": "",
+        "expiry": "",
+        "broker": "2712849475d6de23",
+        "x": 850,
+        "y": 560,
+        "wires": []
+    },
+    {
+        "id": "2f20b7470803f185",
+        "type": "file",
+        "z": "4e30d3dae1a28548",
+        "name": "GPS Event Log",
+        "filename": "/tmp/gps-events.log",
+        "appendNewline": true,
+        "createDir": false,
+        "overwriteFile": "false",
+        "encoding": "none",
+        "x": 1180,
+        "y": 820,
+        "wires": [
+            []
+        ]
+    },
+    {
+        "id": "5470645a86a4b3cf",
+        "type": "function",
+        "z": "4e30d3dae1a28548",
+        "name": "Log Formatter",
+        "func": "// Format log entries for file output\n\nif (msg.topic === 'gps/log' && msg.payload) {\n    const logLevel = flow.get('config_log_level') || 'info';\n    const levels = {debug: 0, info: 1, warn: 2, error: 3};\n    \n    const msgLevel = levels[msg.payload.level] || 1;\n    const configLevel = levels[logLevel] || 1;\n    \n    // Only log if message level is >= configured level\n    if (msgLevel >= configLevel) {\n        const formatted = JSON.stringify(msg.payload);\n        return {payload: formatted};\n    }\n}\n\nreturn null;",
+        "outputs": 1,
+        "noerr": 0,
+        "initialize": "",
+        "finalize": "",
+        "libs": [],
+        "x": 1120,
+        "y": 720,
+        "wires": [
+            [
+                "2f20b7470803f185"
+            ]
+        ]
+    },
+    {
+        "id": "0e5a09006b3818c0",
+        "type": "function",
+        "z": "4e30d3dae1a28548",
+        "name": "Enhanced Error Handler",
+        "func": "// Enhanced Error Handler with retry logic and fallback\n\nconst errorSource = msg.errorSource || 'unknown';\nconst errorMsg = msg.payload || 'Unknown error';\nconst now = Date.now();\n\n// Track error counts\nlet errorCounts = flow.get('error_counts') || {};\nerrorCounts[errorSource] = (errorCounts[errorSource] || 0) + 1;\nflow.set('error_counts', errorCounts);\n\n// Log the error\nconst logEntry = {\n    ts: new Date().toISOString(),\n    level: 'error',\n    event: 'error_occurred',\n    data: {\n        source: errorSource,\n        message: errorMsg,\n        count: errorCounts[errorSource],\n        raw: msg\n    }\n};\n\n// Store in event logs\nlet logs = flow.get('event_logs') || [];\nlogs.push(logEntry);\nif (logs.length > 100) logs = logs.slice(-100);\nflow.set('event_logs', logs);\n\n// Determine if we should implement fallback behavior\nif (errorSource === 'starlink' && errorCounts.starlink > 3) {\n    // Too many Starlink errors, prefer RUTOS\n    flow.set('starlink_degraded', true);\n    flow.set('starlink_degraded_until', now + 600000); // 10 minutes\n} else if (errorSource === 'rutos' && errorCounts.rutos > 3) {\n    // Too many RUTOS errors, prefer Starlink\n    flow.set('rutos_degraded', true);\n    flow.set('rutos_degraded_until', now + 600000); // 10 minutes\n}\n\n// Reset error counts periodically\nif (!flow.get('error_reset_timer')) {\n    flow.set('error_reset_timer', now);\n} else if (now - flow.get('error_reset_timer') > 3600000) { // 1 hour\n    flow.set('error_counts', {});\n    flow.set('error_reset_timer', now);\n}\n\nreturn [\n    {topic: 'gps/log', payload: logEntry},\n    {topic: 'gps/error', payload: {source: errorSource, message: errorMsg, count: errorCounts[errorSource]}}\n];",
+        "outputs": 2,
+        "noerr": 0,
+        "initialize": "",
+        "finalize": "",
+        "libs": [],
+        "x": 1010,
+        "y": 500,
+        "wires": [
+            [
+                "5470645a86a4b3cf"
+            ],
+            [
+                "c018e7469a67330a"
+            ]
+        ]
+    },
+    {
+        "id": "c018e7469a67330a",
+        "type": "debug",
+        "z": "4e30d3dae1a28548",
+        "name": "Error Debug",
+        "active": true,
+        "tosidebar": true,
+        "console": false,
+        "tostatus": false,
+        "complete": "payload",
+        "targetType": "msg",
+        "x": 710,
+        "y": 960,
+        "wires": []
+    },
+    {
+        "id": "bbc5157f1e1ff405",
+        "type": "mqtt in",
+        "z": "4e30d3dae1a28548",
+        "name": "IDs listener",
+        "topic": "device/+/DBus",
+        "qos": "2",
+        "datatype": "auto-detect",
+        "broker": "2712849475d6de23",
+        "nl": false,
+        "rap": true,
+        "rh": 0,
+        "inputs": 0,
+        "x": 130,
+        "y": 40,
+        "wires": [
+            [
+                "847cd0354b93ade0"
+            ]
+        ]
+    },
+    {
+        "id": "847cd0354b93ade0",
+        "type": "json",
+        "z": "4e30d3dae1a28548",
+        "name": "",
+        "property": "payload",
+        "action": "",
+        "pretty": false,
+        "x": 300,
+        "y": 40,
+        "wires": [
+            [
+                "4a63333ee1c86166"
+            ]
+        ]
+    },
+    {
+        "id": "bd910a2241ec882e",
+        "type": "inject",
+        "z": "4e30d3dae1a28548",
+        "name": "Every 30 min",
+        "props": [],
+        "repeat": "1800",
+        "crontab": "",
+        "once": true,
+        "onceDelay": "1",
+        "topic": "",
+        "x": 130,
+        "y": 180,
+        "wires": [
+            [
+                "9fc73aebec01e28a"
+            ]
+        ]
+    },
+    {
+        "id": "9fc73aebec01e28a",
+        "type": "function",
+        "z": "4e30d3dae1a28548",
+        "name": "Trigger Branches",
+        "func": "// Venus OS Compatible Secure Credential Manager\n// Fixed for Node-RED function nodes without process access\n\nfunction getCredentials() {\n    // Method 1: Try to get environment variables through Node-RED's env access\n    let envUsername, envPassword, encodedCreds;\n    \n    try {\n        // Node-RED way to access environment variables\n        envUsername = env.get('RUTOS_USERNAME');\n        envPassword = env.get('RUTOS_PASSWORD');\n        encodedCreds = env.get('RUTOS_CREDENTIALS_B64');\n    } catch (e) {\n        // If env.get doesn't work, try alternative method\n        node.log('Environment access method 1 failed, trying alternatives...');\n    }\n    \n    // Method 1A: Environment Variables (if available)\n    if (envUsername && envPassword) {\n        node.log('✅ Using credentials from environment variables');\n        return {\n            username: envUsername,\n            password: envPassword,\n            source: 'environment'\n        };\n    }\n    \n    // Method 1B: Base64 Encoded Environment Variable\n    if (encodedCreds) {\n        try {\n            const decoded = Buffer.from(encodedCreds, 'base64').toString('utf-8');\n            const [username, password] = decoded.split(':');\n            if (username && password) {\n                node.log('✅ Using credentials from encoded environment variable');\n                return {\n                    username: username,\n                    password: password,\n                    source: 'encoded_environment'\n                };\n            }\n        } catch (e) {\n            node.warn('❌ Failed to decode credentials from environment');\n        }\n    }\n    \n    // Method 2: Node-RED Flow Context Store (Most Reliable for Venus OS)\n    const contextCreds = flow.get('rutos_credentials');\n    if (contextCreds && contextCreds.username && contextCreds.password) {\n        node.log('✅ Using credentials from flow context store');\n        return {\n            username: contextCreds.username,\n            password: contextCreds.password,\n            source: 'flow_context'\n        };\n    }\n    \n    // Method 3: Node-RED Global Context Store\n    const globalCreds = global.get('rutos_credentials');\n    if (globalCreds && globalCreds.username && globalCreds.password) {\n        node.log('✅ Using credentials from global context store');\n        return {\n            username: globalCreds.username,\n            password: globalCreds.password,\n            source: 'global_context'\n        };\n    }\n    \n    // Method 4: Venus OS File-based Fallback\n    try {\n        const fs = require('fs');\n        const credFile = '/data/rutos_credentials.json';\n        if (fs.existsSync(credFile)) {\n            const fileData = JSON.parse(fs.readFileSync(credFile, 'utf8'));\n            if (fileData.username && fileData.password) {\n                node.log('✅ Using credentials from Venus OS file store');\n                return {\n                    username: fileData.username,\n                    password: fileData.password,\n                    source: 'venus_file'\n                };\n            }\n        }\n    } catch (e) {\n        node.warn('Venus OS file credential method not available');\n    }\n    \n    // Fallback error with Venus OS specific guidance\n    node.error('🚨 No credentials found! Venus OS troubleshooting:');\n    node.error('💡 Option 1: Use Node-RED context store (most reliable)');\n    node.error('💡 Option 2: Check Node-RED service user environment');\n    node.error('💡 Option 3: Use /data/rutos_credentials.json file method');\n    \n    return null;\n}\n\n// Get credentials securely\nconst credentials = getCredentials();\n\nif (!credentials) {\n    return [{\n        payload: \"go\"\n    }, {\n        payload: {\n            error: \"No credentials configured for Venus OS\",\n            setup_required: true,\n            suggested_method: \"context_store\"\n        }\n    }];\n}\n\n// Set status indicator\nnode.status({\n    fill: 'green',\n    shape: 'dot',\n    text: `Auth: ${credentials.source}`\n});\n\n// Return secure credentials\nreturn [{\n    payload: \"go\"\n}, {\n    payload: {\n        username: credentials.username,\n        password: credentials.password,\n        auth_method: credentials.source\n    }\n}];\n",
+        "outputs": 2,
+        "timeout": "",
+        "noerr": 0,
+        "initialize": "",
+        "finalize": "",
+        "libs": [],
+        "x": 330,
+        "y": 180,
+        "wires": [
+            [
+                "91df243f5e4e71ad"
+            ],
+            [
+                "c52c7ee9a2428e0f"
+            ]
+        ]
+    },
+    {
+        "id": "91df243f5e4e71ad",
+        "type": "exec",
+        "z": "4e30d3dae1a28548",
+        "command": "/data/bin/grpcurl -plaintext -emit-defaults -d '{\"get_diagnostics\":{}}' 192.168.100.1:9200 SpaceX.API.Device.Device/Handle",
+        "addpay": false,
+        "append": "",
+        "useSpawn": "false",
+        "timer": "10",
+        "winHide": false,
+        "oldrc": false,
+        "name": "Get Starlink GPS",
+        "x": 570,
+        "y": 140,
+        "wires": [
+            [
+                "c6178b802dc29bda"
+            ],
+            [
+                "666387cf543387b5"
+            ],
+            []
+        ]
+    },
+    {
+        "id": "c6178b802dc29bda",
+        "type": "json",
+        "z": "4e30d3dae1a28548",
+        "name": "",
+        "property": "payload",
+        "action": "",
+        "pretty": false,
+        "x": 750,
+        "y": 120,
+        "wires": [
+            [
+                "083c2fd9c84f23e1"
+            ]
+        ]
+    },
+    {
+        "id": "083c2fd9c84f23e1",
+        "type": "function",
+        "z": "4e30d3dae1a28548",
+        "name": "Format Starlink GPS",
+        "func": "msg.topic = \"starlink\";\n\nvar diag = msg.payload && msg.payload.dishGetDiagnostics;\nif (!diag || !diag.location) {\n    // Send error to error handler\n    node.send([null, {errorSource: 'starlink', payload: 'No diagnostics or location data'}]);\n    return null;\n}\n\nvar loc = diag.location;\nif (loc.latitude == null || loc.longitude == null || loc.altitudeMeters == null) {\n    node.send([null, {errorSource: 'starlink', payload: 'Missing coordinate data'}]);\n    return null;\n}\n\nvar o = {\n    lat   : +loc.latitude,\n    lon   : +loc.longitude,\n    alt   : +loc.altitudeMeters,\n    gpsFix: loc.uncertaintyMetersValid ? 1 : 0\n};\nif (loc.uncertaintyMetersValid && loc.uncertaintyMeters != null) {\n    o.hAcc = +loc.uncertaintyMeters;      // horizontal accuracy (m)\n}\nmsg.payload = o;\nreturn [msg, null];",
+        "outputs": 2,
+        "timeout": "",
+        "noerr": 0,
+        "initialize": "",
+        "finalize": "",
+        "libs": [],
+        "x": 960,
+        "y": 120,
+        "wires": [
+            [
+                "18b3540922f4f53e",
+                "83d541dd3a705068"
+            ],
+            [
+                "0e5a09006b3818c0"
+            ]
+        ]
+    },
+    {
+        "id": "666387cf543387b5",
+        "type": "function",
+        "z": "4e30d3dae1a28548",
+        "name": "Starlink fail",
+        "func": "msg.topic=\"starlink\";\nmsg.payload=null;\n\n// Send to error handler\nnode.send([msg, {errorSource: 'starlink', payload: 'gRPC command failed: ' + JSON.stringify(msg)}]);\n\nreturn [msg, null];",
+        "outputs": 2,
+        "timeout": "",
+        "noerr": 0,
+        "initialize": "",
+        "finalize": "",
+        "libs": [],
+        "x": 800,
+        "y": 180,
+        "wires": [
+            [
+                "18b3540922f4f53e"
+            ],
+            [
+                "0e5a09006b3818c0"
+            ]
+        ]
+    },
+    {
+        "id": "c52c7ee9a2428e0f",
+        "type": "http request",
+        "z": "4e30d3dae1a28548",
+        "name": "RUTOS login",
+        "method": "POST",
+        "ret": "json",
+        "paytoqs": "ignore",
+        "url": "https://192.168.80.1/api/login",
+        "tls": "19c194ce1c405d3a",
+        "persist": false,
+        "proxy": "",
+        "insecureHTTPParser": false,
+        "authType": "",
+        "senderr": false,
+        "headers": [
+            {
+                "keyType": "other",
+                "keyValue": "Content-Type",
+                "valueType": "other",
+                "valueValue": "application/json"
+            }
+        ],
+        "x": 550,
+        "y": 260,
+        "wires": [
+            [
+                "afe33f5a422d5077"
+            ]
+        ]
+    },
+    {
+        "id": "afe33f5a422d5077",
+        "type": "function",
+        "z": "4e30d3dae1a28548",
+        "name": "Set auth header",
+        "func": "const p=typeof msg.payload==='string'?JSON.parse(msg.payload):msg.payload;\nconst t=p?.data?.token;\nif(!t){\n    // Send to error handler\n    node.send([null, {errorSource: 'rutos', payload: 'No authentication token received'}]);\n    return null;\n}\nmsg.headers={Authorization:`Bearer ${t}`};\nmsg.payload={};\nreturn [msg, null];",
+        "outputs": 2,
+        "timeout": "",
+        "noerr": 0,
+        "initialize": "",
+        "finalize": "",
+        "libs": [],
+        "x": 800,
+        "y": 260,
+        "wires": [
+            [
+                "24d35db89377d46d"
+            ],
+            [
+                "0e5a09006b3818c0"
+            ]
+        ]
+    },
+    {
+        "id": "24d35db89377d46d",
+        "type": "http request",
+        "z": "4e30d3dae1a28548",
+        "name": "Get RUTOS GPS",
+        "method": "GET",
+        "ret": "obj",
+        "paytoqs": "ignore",
+        "url": "https://192.168.80.1/api/gps/position/status",
+        "tls": "19c194ce1c405d3a",
+        "persist": false,
+        "proxy": "",
+        "insecureHTTPParser": false,
+        "authType": "",
+        "senderr": false,
+        "headers": [],
+        "x": 570,
+        "y": 340,
+        "wires": [
+            [
+                "9d13ee93a5fb58f7",
+                "7c95570ff8f779f7"
+            ]
+        ]
+    },
+    {
+        "id": "9d13ee93a5fb58f7",
+        "type": "function",
+        "z": "4e30d3dae1a28548",
+        "name": "Format RUTOS GPS",
+        "func": "msg.topic = \"rutos\";\n\nvar d = msg.payload && msg.payload.data;\nif (!d) {\n    node.send([null, {errorSource: 'rutos', payload: 'No GPS data received'}]);\n    return null;\n}\n\nvar fix = parseInt(d.fix_status, 10) || 0;\nif (d.latitude == null || d.longitude == null || d.altitude == null) {\n    node.send([null, {errorSource: 'rutos', payload: 'Missing coordinate data'}]);\n    return null;\n}\n\nvar o = {\n    lat   : +d.latitude,\n    lon   : +d.longitude,\n    alt   : +d.altitude,\n    gpsFix: fix\n};\n\nif (d.satellites != null) o.sats = +d.satellites;   // satellite count\nif (d.accuracy  != null) o.hAcc = +d.accuracy;      // HDOP (m)\nif (d.speed     != null) {\n    var s = +d.speed;                               // km / h\n    if (!isNaN(s)) o.speed = s * 0.277777778;       // → m / s\n}\nmsg.payload = o;\nreturn [msg, null];",
+        "outputs": 2,
+        "timeout": "",
+        "noerr": 0,
+        "initialize": "",
+        "finalize": "",
+        "libs": [],
+        "x": 820,
+        "y": 340,
+        "wires": [
+            [
+                "18b3540922f4f53e",
+                "7061bdf3f3e95159"
+            ],
+            [
+                "0e5a09006b3818c0"
+            ]
+        ]
+    },
+    {
+        "id": "18b3540922f4f53e",
+        "type": "join",
+        "z": "4e30d3dae1a28548",
+        "name": "Combine GPS",
+        "mode": "custom",
+        "build": "object",
+        "property": "payload",
+        "propertyType": "msg",
+        "key": "topic",
+        "joiner": "\\n",
+        "joinerType": "str",
+        "accumulate": false,
+        "timeout": "15",
+        "count": "2",
+        "reduceRight": false,
+        "x": 1160,
+        "y": 200,
+        "wires": [
+            [
+                "3a9eebfc35f54584",
+                "4edfd4ab8d649cdc"
+            ]
+        ]
+    },
+    {
+        "id": "3a9eebfc35f54584",
+        "type": "function",
+        "z": "4e30d3dae1a28548",
+        "name": "Enhanced GPS Logic",
+        "func": "// Enhanced GPS Processing with configurable thresholds and smart movement logic\n\n// ===== UTILITY FUNCTIONS =====\nfunction hav(p1, p2) {\n    const R = 6371000, rad = Math.PI / 180;\n    const dLat = (p2.lat - p1.lat) * rad, dLon = (p2.lon - p1.lon) * rad;\n    const lat1 = p1.lat * rad, lat2 = p2.lat * rad;\n    const a = Math.sin(dLat / 2) ** 2 + Math.cos(lat1) * Math.cos(lat2) * Math.sin(dLon / 2) ** 2;\n    return R * 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1 - a));\n}\n\nfunction logEvent(level, event, data) {\n    const logEntry = {\n        ts: new Date().toISOString(),\n        level: level,\n        event: event,\n        data: data\n    };\n    \n    // Store recent logs in flow context (last 100 entries)\n    let logs = flow.get('event_logs') || [];\n    logs.push(logEntry);\n    if (logs.length > 100) logs = logs.slice(-100);\n    flow.set('event_logs', logs);\n    \n    // Send to logging output (4th output) - but don't break main flow\n    try {\n        node.send([null, null, null, { payload: logEntry, topic: 'gps/log' }]);\n    } catch (e) {\n        // If logging fails, don't break the main GPS processing\n        node.warn('Logging failed: ' + e.message);\n    }\n}\n\n// ===== CONFIGURABLE PARAMETERS =====\nconst config = {\n    // GPS quality thresholds - Updated with data-driven values\n    rutosAccuracyThreshold: flow.get('config_rutos_accuracy') || 1,        // Data-driven: 1m (2x degradation from 0.5m typical)\n    starlinkAccuracyThreshold: flow.get('config_starlink_accuracy') || 7,  // Data-driven: 7m (avg 5.5m + buffer)\n    \n    // Change detection thresholds - Updated with data-driven values\n    positionEpsilon: flow.get('config_position_eps') || 6,                 // Data-driven: 6m (max observed 5.2m + buffer)\n    altitudeThreshold: flow.get('config_altitude_threshold') || 18,        // Data-driven: 18m (p95 15.4m + buffer)\n    speedThreshold: flow.get('config_speed_threshold') || 0.1,             // km/h\n    \n    // Movement detection\n    campingMoveThreshold: flow.get('config_camping_threshold') || 50,      // meters\n    resetObstructionThreshold: flow.get('config_obstruction_threshold') || 200, // meters\n    stationaryTimeThreshold: flow.get('config_stationary_time') || 300000, // 5 min in ms\n    gpsStabilityThreshold: flow.get('config_gps_stability_threshold') || 6, // Data-driven: 6m (max jitter 4.7m + buffer)\n    \n    // Source override\n    sourceOverride: flow.get('config_source_override') || 'auto'          // 'auto', 'rutos', 'starlink'\n};\n\n// TESTING MODE - Force updates for initial testing\nconst testingMode = flow.get('testing_mode') || true;  // Set to false for production\n\n// ===== DATA PREPARATION =====\nconst star = msg.payload.starlink || {};\nconst rut = msg.payload.rutos || {};\nconst last = flow.get('last_position') || {};\nconst victronStored = flow.get('victron_stored_position') || {};\nconst now = Date.now();\nconst forceUpdate = flow.get('force_next_update') || testingMode;\n\n// DEBUG: Log what we received\nnode.warn('GPS INPUT: RUTOS=' + JSON.stringify(rut));\nnode.warn('GPS INPUT: Starlink=' + JSON.stringify(star));\nif (testingMode) node.warn('TESTING MODE: Force updates enabled');\n\nlogEvent('debug', 'gps_processing_start', { star: !!star.lat, rutos: !!rut.lat, override: config.sourceOverride, force: !!forceUpdate });\n\n// Check for degraded sources\nconst starlinkDegraded = flow.get('starlink_degraded') && now < (flow.get('starlink_degraded_until') || 0);\nconst rutosDegraded = flow.get('rutos_degraded') && now < (flow.get('rutos_degraded_until') || 0);\n\n// ===== SOURCE SELECTION WITH OVERRIDE =====\nlet src, srcData;\n\n// Manual override logic\nif (config.sourceOverride === 'rutos' && rut.gpsFix > 0 && !rutosDegraded) {\n    src = 'rutos';\n    srcData = rut;\n    node.warn('SELECTED: Manual override to RUTOS');\n    logEvent('info', 'source_override_rutos', rut);\n} else if (config.sourceOverride === 'starlink' && star.gpsFix > 0 && !starlinkDegraded) {\n    src = 'starlink';\n    srcData = star;\n    node.warn('SELECTED: Manual override to Starlink');\n    logEvent('info', 'source_override_starlink', star);\n} else {\n    // Automatic source selection with configurable thresholds and degradation awareness\n    const goodRut = rut.gpsFix > 0 && Number.isFinite(rut.hAcc) && rut.hAcc < config.rutosAccuracyThreshold && !rutosDegraded;\n    const goodStar = star.gpsFix > 0 && Number.isFinite(star.hAcc) && star.hAcc < config.starlinkAccuracyThreshold && !starlinkDegraded;\n    \n    node.warn('EVALUATION: RUTOS good=' + goodRut + ' (gpsFix=' + rut.gpsFix + ', hAcc=' + rut.hAcc + ', threshold=' + config.rutosAccuracyThreshold + ')');\n    node.warn('EVALUATION: Starlink good=' + goodStar + ' (gpsFix=' + star.gpsFix + ', hAcc=' + star.hAcc + ', threshold=' + config.starlinkAccuracyThreshold + ')');\n    \n    if (goodRut && goodStar) {\n        src = (rut.hAcc <= star.hAcc) ? 'rutos' : 'starlink';\n        srcData = src === 'rutos' ? rut : star;\n        node.warn('SELECTED: Best accuracy - ' + src);\n        logEvent('info', 'auto_source_best_accuracy', { selected: src, rutosAcc: rut.hAcc, starlinkAcc: star.hAcc });\n    } else if (goodRut) {\n        src = 'rutos';\n        srcData = rut;\n        node.warn('SELECTED: RUTOS only');\n        logEvent('info', 'auto_source_rutos_only', rut);\n    } else if (goodStar) {\n        src = 'starlink'; \n        srcData = star;\n        node.warn('SELECTED: Starlink only');\n        logEvent('info', 'auto_source_starlink_only', star);\n    } else {\n        node.warn('NO GOOD GPS SOURCES: RUTOS gpsFix=' + rut.gpsFix + ', Starlink gpsFix=' + star.gpsFix);\n        // Fallback to last known position with degraded accuracy\n        if (last.lat && last.lon) {\n            node.warn('FALLBACK: Using last known position');\n            logEvent('warn', 'fallback_last_position', { age: now - (last.ts || 0), starlinkDegraded, rutosDegraded });\n            return [\n                {\n                    payload: {\n                        ...last,\n                        gpsFix: 0,\n                        hAcc: 999,\n                        source: 'fallback',\n                        ts: now\n                    }\n                },\n                null, null, null\n            ];\n        }\n        node.warn('ERROR: No GPS sources available and no fallback position');\n        logEvent('error', 'no_gps_sources_available', { rutos: rut, starlink: star, degraded: {starlink: starlinkDegraded, rutos: rutosDegraded} });\n        return null;\n    }\n}\n\n// ===== POSITION PROCESSING =====\nlet c = {\n    lat: srcData.lat,\n    lon: srcData.lon, \n    alt: srcData.alt,\n    gpsFix: srcData.gpsFix,\n    hAcc: srcData.hAcc,\n    sats: srcData.sats,\n    source: src,\n    ts: now\n};\n\nnode.warn('POSITION CREATED: ' + JSON.stringify(c));\n\n// Speed calculation\nif (Number.isFinite(srcData.speed)) {\n    c.speed = srcData.speed;\n} else if (Number.isFinite(last.lat) && Number.isFinite(last.lon) && last.ts) {\n    const m = hav(last, c);\n    const sec = (now - last.ts) / 1000;\n    c.speed = sec > 0 ? (m / sec) * 3.6 : 0; // km/h\n} else {\n    c.speed = 0;\n}\n\n// ===== MOVEMENT ANALYSIS =====\nconst movedFromLast = Number.isFinite(last.lat) ? hav(last, c) : 0;\nconst movedFromVictron = Number.isFinite(victronStored.lat) ? hav(victronStored, c) : 0;\nconst timeSinceLastMove = last.ts ? now - last.ts : 0;\nconst isStationary = timeSinceLastMove > config.stationaryTimeThreshold && c.speed < 1;\n\nnode.warn('MOVEMENT: moved from last=' + movedFromLast.toFixed(1) + 'm, from Victron=' + movedFromVictron.toFixed(1) + 'm');\n\nlogEvent('debug', 'movement_analysis', {\n    movedFromLast: movedFromLast.toFixed(1),\n    movedFromVictron: movedFromVictron.toFixed(1),\n    timeSinceLastMove: Math.round(timeSinceLastMove / 1000),\n    isStationary: isStationary,\n    speed: c.speed\n});\n\n// ===== CHANGE DETECTION =====\n// Updated to use distance-based position comparison with data-driven thresholds\nconst posChanged = Number.isFinite(last.lat) && Number.isFinite(last.lon) ? \n                   hav(last, c) > config.positionEpsilon : true;  // Use Haversine distance in meters\nconst altChanged = Math.abs((last.alt || 0) - c.alt) > config.altitudeThreshold;\nconst speedChanged = Math.abs((last.speed || 0) - c.speed) > config.speedThreshold;\nconst changed = posChanged || altChanged || speedChanged || forceUpdate;\n\nnode.warn('CHANGE DETECTION: pos=' + posChanged + ', alt=' + altChanged + ', speed=' + speedChanged + ', force=' + !!forceUpdate + ' => changed=' + changed);\n\n// Update stored position\nflow.set('last_position', { ...c, ts: now });\n\n// Clear force update flag (but not testing mode)\nif (flow.get('force_next_update')) {\n    flow.set('force_next_update', false);\n    logEvent('info', 'force_update_processed', {});\n}\n\nif (!changed) {\n    node.warn('NO SIGNIFICANT CHANGE - not sending update');\n    logEvent('debug', 'no_significant_change', { posChanged, altChanged, speedChanged });\n    return null;\n}\n\n// ===== OUTPUT LOGIC =====\nlet outputs = [null, null, null, null]; // [update, obstruction_reset, victron_update, log]\n\n// Track accuracy statistics for both sources\nif (src === 'rutos' && Number.isFinite(rut.hAcc)) {\n    let rutosStats = flow.get('rutos_accuracy_stats') || {readings: [], sum: 0, count: 0, avg: 0};\n    rutosStats.readings.push(rut.hAcc);\n    if (rutosStats.readings.length > 100) rutosStats.readings = rutosStats.readings.slice(-100);\n    rutosStats.sum += rut.hAcc;\n    rutosStats.count++;\n    rutosStats.avg = rutosStats.sum / rutosStats.count;\n    flow.set('rutos_accuracy_stats', rutosStats);\n} else if (src === 'starlink' && Number.isFinite(star.hAcc)) {\n    let starlinkStats = flow.get('starlink_accuracy_stats') || {readings: [], sum: 0, count: 0, avg: 0};\n    starlinkStats.readings.push(star.hAcc);\n    if (starlinkStats.readings.length > 100) starlinkStats.readings = starlinkStats.readings.slice(-100);\n    starlinkStats.sum += star.hAcc;\n    starlinkStats.count++;\n    starlinkStats.avg = starlinkStats.sum / starlinkStats.count;\n    flow.set('starlink_accuracy_stats', starlinkStats);\n}\n\n// Always send GPS update (output 1)\noutputs[0] = { payload: c };\nnode.warn('OUTPUT 1: GPS update - ' + JSON.stringify(c));\n\n// Obstruction map reset logic (output 2)\n// Reset if: moved significantly AND (camping move OR been stationary)\nif (movedFromLast > config.resetObstructionThreshold && \n    (movedFromLast < 1000 || isStationary)) { // < 1km suggests camping, not highway driving\n    \n    logEvent('info', 'obstruction_reset_triggered', {\n        distance: movedFromLast.toFixed(1),\n        reason: movedFromLast < 1000 ? 'camping_move' : 'stationary_then_moved'\n    });\n    \n    outputs[1] = { \n        payload: c, \n        distance: movedFromLast,\n        reason: 'position_change'\n    };\n    node.warn('OUTPUT 2: Obstruction reset triggered');\n}\n\n// Victron GPS update logic (output 3) - Force in testing mode\nconst lastVictronUpdate = flow.get('last_victron_update') || 0;\nconst victronUpdateNeeded = movedFromVictron > config.campingMoveThreshold || \n                           (now - lastVictronUpdate) > 300000 || // 5 minutes\n                           testingMode; // Force in testing mode\n\nif (victronUpdateNeeded || forceUpdate) {\n    logEvent('info', 'victron_update_triggered', {\n        distanceFromStored: movedFromVictron.toFixed(1),\n        timeSinceLastUpdate: Math.round((now - lastVictronUpdate) / 1000),\n        reason: forceUpdate ? 'forced' : (testingMode ? 'testing_mode' : (movedFromVictron > config.campingMoveThreshold ? 'position_change' : 'time_based'))\n    });\n    \n    flow.set('last_victron_update', now);\n    outputs[2] = { payload: c };\n    node.warn('OUTPUT 3: Victron update triggered');\n}\n\nlogEvent('info', 'gps_processing_complete', {\n    source: src,\n    position: `${c.lat.toFixed(6)}, ${c.lon.toFixed(6)}`,\n    accuracy: c.hAcc,\n    outputs: {\n        update: !!outputs[0],\n        obstruction: !!outputs[1], \n        victron: !!outputs[2]\n    }\n});\n\nnode.warn('FINAL OUTPUT: ' + outputs.map((o, i) => `[${i}]: ${!!o}`).join(', '));\n\nreturn outputs;",
+        "outputs": 4,
+        "timeout": "",
+        "noerr": 0,
+        "initialize": "",
+        "finalize": "",
+        "libs": [],
+        "x": 1450,
+        "y": 180,
+        "wires": [
+            [
+                "4ae9422b4c45b783"
+            ],
+            [
+                "7de2a05f702a6b08",
+                "92177b031430cf7d"
+            ],
+            [
+                "88017c7ba12d0be4"
+            ],
+            [
+                "5470645a86a4b3cf"
+            ]
+        ]
+    },
+    {
+        "id": "107d19b64aaf856e",
+        "type": "mqtt in",
+        "z": "4e30d3dae1a28548",
+        "d": true,
+        "name": "GPS tap",
+        "topic": "W/+/gps/+/+/#",
+        "qos": "2",
+        "datatype": "auto-detect",
+        "broker": "2712849475d6de23",
+        "nl": false,
+        "rap": false,
+        "rh": 0,
+        "inputs": 0,
+        "x": 130,
+        "y": 480,
+        "wires": [
+            [
+                "27a30d2780911090"
+            ]
+        ]
+    },
+    {
+        "id": "61a48d0468fc59df",
+        "type": "debug",
+        "z": "4e30d3dae1a28548",
+        "d": true,
+        "name": "Pretty GPS",
+        "active": true,
+        "tosidebar": true,
+        "console": false,
+        "tostatus": false,
+        "complete": "payload",
+        "targetType": "msg",
+        "statusVal": "",
+        "statusType": "auto",
+        "x": 650,
+        "y": 480,
+        "wires": []
+    },
+    {
+        "id": "83d541dd3a705068",
+        "type": "debug",
+        "z": "4e30d3dae1a28548",
+        "d": true,
+        "name": "Format Starlink GPS",
+        "active": true,
+        "tosidebar": true,
+        "console": false,
+        "tostatus": false,
+        "complete": "payload",
+        "targetType": "msg",
+        "statusVal": "",
+        "statusType": "auto",
+        "x": 1220,
+        "y": 100,
+        "wires": []
+    },
+    {
+        "id": "7061bdf3f3e95159",
+        "type": "debug",
+        "z": "4e30d3dae1a28548",
+        "d": true,
+        "name": "Format RUTOS GPS",
+        "active": true,
+        "tosidebar": true,
+        "console": false,
+        "tostatus": false,
+        "complete": "payload",
+        "targetType": "msg",
+        "statusVal": "",
+        "statusType": "auto",
+        "x": 1080,
+        "y": 400,
+        "wires": []
+    },
+    {
+        "id": "4ae9422b4c45b783",
+        "type": "debug",
+        "z": "4e30d3dae1a28548",
+        "name": "Combined",
+        "active": true,
+        "tosidebar": true,
+        "console": false,
+        "tostatus": false,
+        "complete": "payload",
+        "targetType": "msg",
+        "statusVal": "",
+        "statusType": "auto",
+        "x": 1490,
+        "y": 100,
+        "wires": []
+    },
+    {
+        "id": "7de2a05f702a6b08",
+        "type": "debug",
+        "z": "4e30d3dae1a28548",
+        "name": "Moved >200m",
+        "active": true,
+        "tosidebar": true,
+        "console": false,
+        "tostatus": false,
+        "complete": "payload",
+        "targetType": "msg",
+        "statusVal": "",
+        "statusType": "auto",
+        "x": 1680,
+        "y": 80,
+        "wires": []
+    },
+    {
+        "id": "a8fee551b675e180",
+        "type": "function",
+        "z": "4e30d3dae1a28548",
+        "name": "Flush pending",
+        "func": "const p = flow.get('pending_gps');\nif (p) node.send({payload: p});",
+        "outputs": 1,
+        "timeout": "",
+        "noerr": 0,
+        "initialize": "",
+        "finalize": "",
+        "libs": [],
+        "x": 1100,
+        "y": 40,
+        "wires": [
+            [
+                "88017c7ba12d0be4"
+            ]
+        ]
+    },
+    {
+        "id": "4a63333ee1c86166",
+        "type": "function",
+        "z": "4e30d3dae1a28548",
+        "name": "IDs learned (patched)",
+        "func": "const pl=msg.payload;\nif(pl&&pl.portalId&&pl.deviceInst){global.set('vrm_portal_id',pl.portalId);\nflow.set('gps_device_instance',pl.deviceInst);}\nreturn[ msg, msg ];",
+        "outputs": 2,
+        "timeout": "",
+        "noerr": 0,
+        "initialize": "",
+        "finalize": "",
+        "libs": [],
+        "x": 620,
+        "y": 40,
+        "wires": [
+            [
+                "6d915a82d4bb3983"
+            ],
+            [
+                "a8fee551b675e180"
+            ]
+        ]
+    },
+    {
+        "id": "6d915a82d4bb3983",
+        "type": "debug",
+        "z": "4e30d3dae1a28548",
+        "d": true,
+        "name": "IDs learned",
+        "active": true,
+        "tosidebar": true,
+        "console": false,
+        "tostatus": false,
+        "complete": "true",
+        "x": 850,
+        "y": 20,
+        "wires": []
+    },
+    {
+        "id": "88017c7ba12d0be4",
+        "type": "function",
+        "z": "4e30d3dae1a28548",
+        "name": "Format Victron MQTT (direct)",
+        "func": "// Enhanced Format Victron MQTT Node - Replace your existing \"Format Victron MQTT (direct)\" function with this\n// This version includes automatic GPS instance detection with robust fallback\n\nvar portal = global.get('vrm_portal_id');\nif (!portal) {\n    flow.set('pending_gps', msg.payload);\n    return null;\n}\nflow.set('pending_gps', null);\n\n// Dynamic GPS instance detection with fallback\nvar dev = flow.get('gps_device_instance');\n\n// If no instance is set, trigger discovery and use fallback\nif (!dev) {\n    // Only warn once to avoid log spam\n    const lastWarning = flow.get('last_discovery_warning') || 0;\n    if (Date.now() - lastWarning > 60000) { // Warn max once per minute\n        node.warn('No GPS instance found - triggering discovery');\n        flow.set('last_discovery_warning', Date.now());\n    }\n    \n    // Trigger discovery\n    flow.set('gps_discovery_active', true);\n    flow.set('force_discovery', true);\n    \n    // Use fallback instance while discovering\n    dev = '2'; // Your known working instance\n    flow.set('gps_device_instance', dev);\n}\n\nvar base = 'W/' + portal + '/gps/' + dev;\nvar r = (n, d) => Number.isFinite(n) ? +n.toFixed(d) : n;\nvar gpsData = msg.payload;\n\n// Create MQTT messages with enhanced device registration\nvar out = [\n    // Device creation messages (retain for persistence)\n    { topic: base + '/DeviceInstance', payload: JSON.stringify({ value: parseInt(dev) }), qos: 1, retain: true },\n    { topic: base + '/Mgmt/Connection', payload: JSON.stringify({ value: 'MQTT:Node-RED_GPS' }), qos: 1, retain: true },\n    { topic: base + '/ProductId', payload: JSON.stringify({ value: 0xA200 }), qos: 1, retain: true },\n    { topic: base + '/ProductName', payload: JSON.stringify({ value: 'Node-RED GPS Auto-Discovery' }), qos: 1, retain: true },\n    { topic: base + '/Connected', payload: JSON.stringify({ value: 1 }), qos: 1, retain: true },\n    \n    // GPS data messages\n    { topic: base + '/Position/Latitude', payload: JSON.stringify({ value: r(gpsData.lat, 6) }) },\n    { topic: base + '/Position/Longitude', payload: JSON.stringify({ value: r(gpsData.lon, 6) }) },\n    { topic: base + '/Altitude', payload: JSON.stringify({ value: r(gpsData.alt, 1) }) },\n    { topic: base + '/Speed', payload: JSON.stringify({ value: r((gpsData.speed || 0) / 3.6, 2) }) },\n    { topic: base + '/Fix', payload: JSON.stringify({ value: gpsData.gpsFix || 0 }) }\n];\n\n// Add optional fields\nif (gpsData.sats != null) {\n    out.push({ topic: base + '/NrOfSatellites', payload: JSON.stringify({ value: gpsData.sats }) });\n}\n\nif (gpsData.hAcc != null) {\n    out.push({ topic: base + '/Hdop', payload: JSON.stringify({ value: r(gpsData.hAcc, 1) }) });\n}\n\n// Add timestamp and process identification\nout.push({ topic: base + '/Position/Timestamp', payload: JSON.stringify({ value: Math.floor(Date.now() / 1000) }) });\nout.push({ topic: base + '/Mgmt/ProcessName', payload: JSON.stringify({ value: 'Node-RED' }) });\nout.push({ topic: base + '/Mgmt/ProcessVersion', payload: JSON.stringify({ value: '1.0-AutoDiscovery' }) });\n\n// Enhanced logging with instance tracking (limit to avoid spam)\nconst lastLog = flow.get('last_gps_log') || 0;\nif (Date.now() - lastLog > 30000) { // Log max once per 30 seconds\n    const instanceStatus = flow.get('gps_discovery_active') ? '(discovering)' : '(confirmed)';\n    node.log(`🗺️ GPS Instance ${dev} ${instanceStatus} - Portal ${portal}: ${gpsData.lat.toFixed(6)},${gpsData.lon.toFixed(6)} [${gpsData.source}:${gpsData.hAcc}m]`);\n    flow.set('last_gps_log', Date.now());\n}\n\n// Send each message\nout.forEach(msg => node.send(msg));\n\nreturn null;\n",
+        "outputs": 1,
+        "timeout": "",
+        "noerr": 0,
+        "initialize": "",
+        "finalize": "",
+        "libs": [],
+        "x": 2020,
+        "y": 60,
+        "wires": [
+            [
+                "b4a279442cdf93f4",
+                "720f831714dd26cb"
+            ]
+        ]
+    },
+    {
+        "id": "b4a279442cdf93f4",
+        "type": "mqtt out",
+        "z": "4e30d3dae1a28548",
+        "name": "Victron MQTT",
+        "topic": "",
+        "qos": "",
+        "retain": "",
+        "respTopic": "",
+        "contentType": "",
+        "userProps": "",
+        "correl": "",
+        "expiry": "",
+        "broker": "2712849475d6de23",
+        "x": 2160,
+        "y": 240,
+        "wires": []
+    },
+    {
+        "id": "720f831714dd26cb",
+        "type": "debug",
+        "z": "4e30d3dae1a28548",
+        "name": "debug MQTT out",
+        "active": true,
+        "tosidebar": true,
+        "console": true,
+        "tostatus": false,
+        "complete": "payload",
+        "targetType": "msg",
+        "statusVal": "",
+        "statusType": "auto",
+        "x": 1970,
+        "y": 140,
+        "wires": []
+    },
+    {
+        "id": "2852d21600085b81",
+        "type": "function",
+        "z": "4e30d3dae1a28548",
+        "d": true,
+        "name": "Cache & pretty",
+        "func": "// tolerate either a raw string or a decoded object\nconst raw = (typeof msg.payload === 'string') ? JSON.parse(msg.payload) : msg.payload;\n\nconst parts  = msg.topic.split('/');\nconst portal = parts[1];\nconst dev    = parts[3];\nconst path   = parts.slice(4).join('/');\n\nconst cache = flow.get('last_position') || {};\nif (path === 'Position/Latitude')  cache.lat   = +raw.value;\nif (path === 'Position/Longitude') cache.lon   = +raw.value;\nif (path === 'Altitude')           cache.alt   = +raw.value;\nif (path === 'Speed')              cache.speed = +raw.value;\ncache.ts = Date.now();\nflow.set('last_position', cache);\n\nmsg.payload = { portalId: portal, deviceInst: dev, path, value: raw.value };\nreturn msg;",
+        "outputs": 1,
+        "noerr": 0,
+        "initialize": "",
+        "finalize": "",
+        "libs": [],
+        "x": 460,
+        "y": 480,
+        "wires": [
+            [
+                "61a48d0468fc59df"
+            ]
+        ]
+    },
+    {
+        "id": "27a30d2780911090",
+        "type": "json",
+        "z": "4e30d3dae1a28548",
+        "d": true,
+        "name": "",
+        "property": "payload",
+        "action": "",
+        "pretty": false,
+        "x": 290,
+        "y": 480,
+        "wires": [
+            [
+                "2852d21600085b81"
+            ]
+        ]
+    },
+    {
+        "id": "92177b031430cf7d",
+        "type": "exec",
+        "z": "4e30d3dae1a28548",
+        "command": "/data/bin/grpcurl -plaintext -d {\\\"dish_clear_obstruction_map\\\":{}} 192.168.100.1:9200 SpaceX.API.Device.Device/Handle",
+        "addpay": false,
+        "append": "",
+        "useSpawn": "false",
+        "timer": "10",
+        "winHide": false,
+        "oldrc": false,
+        "name": "Reset Obstruction Map",
+        "x": 1860,
+        "y": 340,
+        "wires": [
+            [
+                "bf51147269f975c3"
+            ],
+            [],
+            []
+        ]
+    },
+    {
+        "id": "bf51147269f975c3",
+        "type": "debug",
+        "z": "4e30d3dae1a28548",
+        "name": "Debug Reset Obstruction",
+        "active": true,
+        "tosidebar": true,
+        "console": false,
+        "tostatus": true,
+        "complete": "payload",
+        "targetType": "msg",
+        "statusVal": "payload",
+        "statusType": "auto",
+        "x": 2010,
+        "y": 440,
+        "wires": []
+    },
+    {
+        "id": "7c95570ff8f779f7",
+        "type": "debug",
+        "z": "4e30d3dae1a28548",
+        "d": true,
+        "name": "Debug RUTOS GPS",
+        "active": true,
+        "tosidebar": true,
+        "console": false,
+        "tostatus": true,
+        "complete": "payload",
+        "targetType": "msg",
+        "statusVal": "payload",
+        "statusType": "auto",
+        "x": 800,
+        "y": 400,
+        "wires": []
+    },
+    {
+        "id": "4edfd4ab8d649cdc",
+        "type": "debug",
+        "z": "4e30d3dae1a28548",
+        "name": "Combine GPS 2",
+        "active": true,
+        "tosidebar": true,
+        "console": false,
+        "tostatus": false,
+        "complete": "payload",
+        "targetType": "msg",
+        "statusVal": "",
+        "statusType": "auto",
+        "x": 1400,
+        "y": 260,
+        "wires": []
+    },
+    {
+        "id": "65630e9831b56bca",
+        "type": "function",
+        "z": "4e30d3dae1a28548",
+        "name": "GPS Device Discovery",
+        "func": "// GPS Device Discovery Node - Put this code in your \"GPS Device Discovery\" function\n// This function automatically discovers available GPS instances on Victron\n\nconst portal = global.get('vrm_portal_id') || 'd41243b4e9b5';\n\n// Check if we need to discover (startup, or periodic check)\nconst lastDiscovery = flow.get('last_gps_discovery') || 0;\nconst discoveryAge = Date.now() - lastDiscovery;\nconst needsDiscovery = discoveryAge > 300000; // Rediscover every 5 minutes\n\nif (needsDiscovery) {\n    flow.set('gps_discovery_active', true);\n    flow.set('last_gps_discovery', Date.now());\n    \n    node.log(`🔍 Starting GPS device discovery for portal: ${portal}`);\n    \n    // Send discovery queries for GPS instances 1-5\n    const discoveryMessages = [];\n    for (let i = 1; i <= 5; i++) {\n        discoveryMessages.push({\n            topic: `R/${portal}/gps/${i}/ProductName`,\n            payload: JSON.stringify({}),\n            qos: 1\n        });\n    }\n    \n    // Send all discovery messages\n    discoveryMessages.forEach(msg => node.send(msg));\n    \n    node.log(`📡 Sent discovery queries for GPS instances 1-5`);\n}\n\n// Pass through the original GPS data\nreturn msg;\n",
+        "outputs": 1,
+        "timeout": 0,
+        "noerr": 0,
+        "initialize": "",
+        "finalize": "",
+        "libs": [],
+        "x": 1600,
+        "y": 560,
+        "wires": [
+            [
+                "e201931c577bebb4",
+                "03c3f133ea34399e"
+            ]
+        ]
+    },
+    {
+        "id": "e201931c577bebb4",
+        "type": "debug",
+        "z": "4e30d3dae1a28548",
+        "name": "GPS Device Discovery Debug",
+        "active": true,
+        "tosidebar": true,
+        "console": false,
+        "tostatus": false,
+        "complete": "payload",
+        "targetType": "msg",
+        "statusVal": "",
+        "statusType": "auto",
+        "x": 1750,
+        "y": 740,
+        "wires": []
+    },
+    {
+        "id": "03c3f133ea34399e",
+        "type": "function",
+        "z": "4e30d3dae1a28548",
+        "name": "GPS Discovery Listener",
+        "func": "// GPS Discovery Listener Node - Put this code in your \"GPS Discovery Listener\" function\n// This function listens for GPS discovery responses and sets the correct instance\n\ntry {\n    // Handle empty or malformed payloads\n    if (!msg.payload || msg.payload === '') {\n        return null;\n    }\n    \n    let parsed;\n    if (typeof msg.payload === 'string') {\n        if (msg.payload.trim() === '') {\n            return null;\n        }\n        try {\n            parsed = JSON.parse(msg.payload);\n        } catch (e) {\n            // Not JSON, might be a simple value - skip silently\n            return null;\n        }\n    } else {\n        parsed = msg.payload;\n    }\n    \n    const topic = msg.topic || '';\n    \n    // Check if this is a GPS discovery response\n    if (topic.includes('/gps/') && flow.get('gps_discovery_active')) {\n        const topicParts = topic.split('/');\n        \n        if (topicParts.length >= 4) {\n            const responsePortal = topicParts[1];\n            const instance = topicParts[3];\n            \n            // Check if this matches our portal\n            const ourPortal = global.get('vrm_portal_id');\n            if (responsePortal === ourPortal) {\n                \n                // If we got a valid response, this GPS instance exists\n                if (parsed && (parsed.value || parsed !== '')) {\n                    const currentInstance = flow.get('gps_device_instance');\n                    \n                    // Use this instance if we don't have one, or if it's different\n                    if (!currentInstance || currentInstance !== instance) {\n                        flow.set('gps_device_instance', instance);\n                        flow.set('gps_discovery_active', false);\n                        \n                        node.log(`✅ GPS Device Found! Portal: ${responsePortal}, Instance: ${instance}`);\n                        \n                        return {\n                            payload: {\n                                discovered: true,\n                                portal: responsePortal,\n                                instance: instance,\n                                previousInstance: currentInstance,\n                                topic: topic\n                            },\n                            topic: 'gps/discovered'\n                        };\n                    }\n                }\n            }\n        }\n    }\n    \n    // Pass through other messages silently\n    return null;\n    \n} catch (error) {\n    // Silent error handling - don't spam logs\n    return null;\n}\n",
+        "outputs": 1,
+        "timeout": 0,
+        "noerr": 0,
+        "initialize": "",
+        "finalize": "",
+        "libs": [],
+        "x": 1710,
+        "y": 460,
+        "wires": [
+            [
+                "88017c7ba12d0be4",
+                "8c6759d8ba34a974"
+            ]
+        ]
+    },
+    {
+        "id": "8c6759d8ba34a974",
+        "type": "debug",
+        "z": "4e30d3dae1a28548",
+        "name": "GPS Discovery Listener Debug",
+        "active": true,
+        "tosidebar": true,
+        "console": false,
+        "tostatus": false,
+        "complete": "payload",
+        "targetType": "msg",
+        "statusVal": "",
+        "statusType": "auto",
+        "x": 1950,
+        "y": 540,
+        "wires": []
+    },
+    {
+        "id": "afa34f92fbb23bda",
+        "type": "debug",
+        "z": "4e30d3dae1a28548",
+        "name": "Read Victron GPS Debug",
+        "active": true,
+        "tosidebar": true,
+        "console": false,
+        "tostatus": false,
+        "complete": "payload",
+        "targetType": "msg",
+        "statusVal": "",
+        "statusType": "auto",
+        "x": 1310,
+        "y": 660,
+        "wires": []
+    },
+    {
+        "id": "2712849475d6de23",
+        "type": "mqtt-broker",
+        "name": "Cerbo MQTT",
+        "broker": "localhost",
+        "port": "1883",
+        "clientid": "",
+        "autoConnect": true,
+        "usetls": false,
+        "protocolVersion": "4",
+        "keepalive": "60",
+        "cleansession": true,
+        "autoUnsubscribe": true,
+        "birthTopic": "",
+        "birthQos": "0",
+        "birthPayload": "",
+        "birthMsg": {},
+        "closeTopic": "",
+        "closeQos": "0",
+        "closePayload": "",
+        "closeMsg": {},
+        "willTopic": "",
+        "willQos": "0",
+        "willPayload": "",
+        "willMsg": {},
+        "userProps": "",
+        "sessionExpiry": ""
+    },
+    {
+        "id": "19c194ce1c405d3a",
+        "type": "tls-config",
+        "name": "",
+        "cert": "",
+        "key": "",
+        "ca": "",
+        "certname": "",
+        "keyname": "",
+        "caname": "",
+        "servername": "",
+        "verifyservercert": false,
+        "alpnprotocol": ""
+    }
 ]
